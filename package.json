@@ -1,0 +1,67 @@
+{
+	"name": "emdash-to-buffer-plus",
+	"version": "0.1.0",
+	"private": true,
+	"description": "EmDash plugin: share newly published entries to Buffer channels and follow how they do.",
+	"keywords": [
+		"emdash",
+		"emdash-plugin",
+		"cms",
+		"plugin",
+		"buffer",
+		"social",
+		"syndication"
+	],
+	"license": "MIT",
+	"author": "Shane Lord",
+	"homepage": "https://github.com/shanelord01/emdash-to-buffer-plus#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/shanelord01/emdash-to-buffer-plus.git"
+	},
+	"bugs": "https://github.com/shanelord01/emdash-to-buffer-plus/issues",
+	"type": "module",
+	"main": "dist/index.mjs",
+	"exports": {
+		".": {
+			"import": "./dist/index.mjs",
+			"types": "./dist/index.d.mts"
+		},
+		"./sandbox": "./dist/plugin.mjs"
+	},
+	"files": [
+		"dist",
+		"emdash-plugin.jsonc"
+	],
+	"scripts": {
+		"validate": "emdash-plugin validate",
+		"build": "emdash-plugin build",
+		"dev": "emdash-plugin dev",
+		"typecheck": "tsc --noEmit",
+		"test": "emdash-plugin validate && vitest run",
+		"bundle": "emdash-plugin bundle",
+		"registry:login": "emdash-plugin login",
+		"registry:publish": "emdash-plugin publish",
+		"release:setup": "emdash-plugin release setup",
+		"prepublishOnly": "pnpm run build"
+	},
+	"engines": {
+		"node": ">=22.16"
+	},
+	"peerDependencies": {
+		"emdash": ">=1.1.0"
+	},
+	"devDependencies": {
+		"@emdash-cms/blocks": "1.1.0",
+		"@emdash-cms/plugin-cli": "0.13.2",
+		"@emdash-cms/plugin-test": "0.2.7",
+		"emdash": "^1.1.0",
+		"typescript": "^5.9.0",
+		"vitest": "^4.1.0",
+		"zod": "4.5.4"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"packageManager": "pnpm@11.25.0"
+}

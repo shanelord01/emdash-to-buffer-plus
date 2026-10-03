@@ -1,0 +1,577 @@
+import type { PluginRuntimeTestHost } from "@emdash-cms/plugin-test";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION, SETUP_ACTION } from "../src/ui/analytics.js";
+import { CHANNEL_ACTION_PREFIX, COLLECTIONS_ACTION, DISCOVER_ACTION, PAGE_PATH, RETRY_ACTION, UTM_ACTION } from "../src/ui/page.js";
+import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
+import { PANEL_AGAIN_ACTION, PANEL_ID, PANEL_RETRY_ACTION, PANEL_SAVE_ACTION } from "../src/ui/panel.js";
+import { TOOL_ROUTES } from "../src/tools/load.js";
+import { bridgeCalls } from "./bridge-calls.js";
+import {
+	allOn,
+	channel,
+	created,
+	deliveries,
+	HOUR,
+	json,
+	newHost,
+	NOW,
+	postsCollection,
+	publishedPost,
+	rateLimited,
+	respond,
+	seedChannels,
+	seedConfig,
+	seedDelivery,
+	seedState,
+	tick,
+	watching,
+} from "./host.js";
+import {
+	aggregatesAnswer,
+	baseline,
+	entry,
+	metric,
+	metricsAnswer,
+	nothingDue,
+	postNode,
+	seedAggregates,
+	seedLedger,
+	seedReport,
+	statusAnswer,
+	today,
+} from "./report-fixtures.js";
+
+/**
+ * Every invocation, at its worst case, against EmDash's sandbox limit.
+ *
+ * A sandboxed invocation may make ten subrequests and each `ctx` call is
+ * one; the eleventh aborts it on Cloudflare. The test host does not enforce
+ * the limit, so each test counts the calls and also checks the invocation
+ * did its full share of work, so a fixture too small to reach the worst
+ * case fails instead of passing quietly.
+ */
+
+const LIMIT = 10;
+
+let host: PluginRuntimeTestHost | undefined;
+
+afterEach(async () => {
+	await host?.dispose();
+	host = undefined;
+	vi.unstubAllEnvs();
+});
+
+const FIVE = ["a", "b", "c", "d", "e"].map((id) => channel(id, "linkedin"));
+
+/** Five channels sharing the cover image, so a publish needs the public URL, a media lookup and more sends than fit. */
+async function publishSetup(runtime: PluginRuntimeTestHost) {
+	await postsCollection(runtime);
+	await seedChannels(runtime, FIVE);
+	await seedConfig(runtime, { channels: allOn(FIVE), collections: { posts: { enabled: true, image: "cover" } } });
+	await seedState(runtime, watching);
+	const media = await runtime.fixtures.media({ filename: "c.jpg", mimeType: "image/jpeg", bytes: new Uint8Array([1]), alt: "x" });
+	return await publishedPost(runtime, { cover: { id: media.id, provider: "local" } });
+}
+
+describe("lifecycle hooks", () => {
+	for (const name of ["plugin:install", "plugin:activate"]) {
+		it(name, async () => {
+			host = await newHost();
+			const calls = await bridgeCalls(() => host!.transport.invokeHook(name, {}));
+			expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+			expect(await host.inspect.kv.get("state")).toMatchObject({ watchSince: expect.any(String) });
+			expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("sync");
+		});
+	}
+});
+
+describe("content hooks", () => {
+	it("a publish to more channels than fit, with a public URL and media lookup", async () => {
+		host = await newHost();
+		const { event } = await publishSetup(host);
+		for (const id of ["p1", "p2", "p3", "p4", "p5"]) await respond(host, created(id));
+
+		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterPublish", event));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("contentPublicUrl");
+		expect(calls).toContain("mediaGet");
+		const rows = await deliveries(host);
+		expect(rows.filter((r) => r.status === "sent").length).toBeGreaterThanOrEqual(1);
+		expect(rows.filter((r) => r.status === "pending").length).toBeGreaterThanOrEqual(1);
+		expect(calls).toContain("cronSchedule");
+	});
+
+	it("a publish whose first send is rate-limited", async () => {
+		host = await newHost();
+		const { event } = await publishSetup(host);
+		await respond(host, rateLimited(120));
+
+		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterPublish", event));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).every((r) => r.status === "pending")).toBe(true);
+	});
+
+	it("a publish into two channels, sent in full", async () => {
+		host = await newHost();
+		await postsCollection(host);
+		const two = FIVE.slice(0, 2);
+		await seedChannels(host, two);
+		await seedConfig(host, { channels: allOn(two), collections: { posts: { enabled: true, image: "cover" } } });
+		await seedState(host, watching);
+		const media = await host.fixtures.media({ filename: "c.jpg", mimeType: "image/jpeg", bytes: new Uint8Array([1]) });
+		const { event } = await publishedPost(host, { cover: { id: media.id } });
+		await respond(host, created("p1"), created("p2"));
+
+		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterPublish", event));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).filter((r) => r.status === "sent")).toHaveLength(2);
+	});
+
+	it("a publish with the editor's choices for the entry", async () => {
+		host = await newHost();
+		const { event, id } = await publishSetup(host);
+		await host.fixtures.plugin.storage("overrides", `posts:${id}`, {
+			collection: "posts",
+			entryId: id,
+			skip: ["e"],
+			text: { a: "Custom {url}" },
+			updatedAt: NOW.toISOString(),
+		});
+		for (const p of ["p1", "p2", "p3", "p4"]) await respond(host, created(p));
+
+		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterPublish", event));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storageGet");
+		const rows = await deliveries(host);
+		expect(rows.find((r) => r.channelId === "e")?.reason).toBe("editorSkipped");
+		expect(rows.find((r) => r.channelId === "a")?.text).toBe("Custom https://www.example.com/blog/hello");
+		expect(rows.filter((r) => r.status === "sent").length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("a create-as-published save", async () => {
+		host = await newHost();
+		const { event } = await publishSetup(host);
+		for (const id of ["p1", "p2", "p3", "p4", "p5"]) await respond(host, created(id));
+		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterSave", { ...event, isNew: true }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).length).toBe(5);
+	});
+
+	it("the first publish the plugin sees, which starts the watch", async () => {
+		host = await newHost();
+		const { event } = await publishSetup(host);
+		await seedState(host, {});
+		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterPublish", event));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("kvSet");
+	});
+});
+
+/** Unknown records whose lookups find nothing, then pending ones: the most expensive mix. */
+async function openRecords(runtime: PluginRuntimeTestHost, count: number) {
+	for (let i = 0; i < count; i++) {
+		await seedDelivery(runtime, `posts:e${i}:c1`, {
+			entryId: `e${i}`,
+			status: i < 2 ? "unknown" : "pending",
+			lastAttemptAt: new Date(NOW.getTime() - HOUR).toISOString(),
+		});
+	}
+}
+
+describe("cron tasks", () => {
+	it("a continuation over unknown and pending records", async () => {
+		host = await newHost();
+		await openRecords(host, 6);
+		for (let i = 0; i < 6; i++) await respond(host, json({ data: { posts: { edges: [] } } }), created(`p${i}`));
+
+		const calls = await bridgeCalls(tick(host, "deliver-a"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storageUpdateIf");
+		expect((await deliveries(host)).some((r) => r.status === "sent")).toBe(true);
+		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("deliver-b");
+	});
+
+	it("a continuation whose lookups fail", async () => {
+		host = await newHost();
+		await openRecords(host, 6);
+		for (let i = 0; i < 8; i++) await respond(host, json({ errors: [{ message: "boom" }] }, 503));
+
+		const calls = await bridgeCalls(tick(host, "deliver-b"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).filter((r) => r.status === "unknown").length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("a sync with a full prune batch and records due", async () => {
+		host = await newHost();
+		await seedReport(host, { ...nothingDue(), lastPruneAt: undefined });
+		for (let i = 0; i < 105; i++) {
+			await seedDelivery(host, `old${i}`, { status: "sent", createdAt: new Date(NOW.getTime() - 400 * 24 * HOUR).toISOString() });
+		}
+		await openRecords(host, 3);
+		for (let i = 0; i < 3; i++) await respond(host, json({ data: { posts: { edges: [] } } }), created(`p${i}`));
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storageDeleteMany");
+		// The delivery pass still ran, with what the prune left it.
+		expect(calls.filter((c) => c === "storageQuery")).toHaveLength(2);
+		expect((await host.inspect.storage.list("deliveries")).length).toBe(8);
+	});
+
+	it("a sync with nothing else due spends the rest on the delivery pass", async () => {
+		host = await newHost();
+		await seedReport(host, nothingDue());
+		await openRecords(host, 6);
+		for (let i = 0; i < 6; i++) await respond(host, json({ data: { posts: { edges: [] } } }), created(`p${i}`));
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).some((r) => r.status === "sent")).toBe(true);
+	});
+});
+
+describe("report runs", () => {
+	const LI = [channel("c1", "linkedin")];
+
+	async function reportSetup(runtime: PluginRuntimeTestHost, report: ReturnType<typeof nothingDue>) {
+		await seedChannels(runtime, LI);
+		await seedConfig(runtime, { channels: allOn(LI) });
+		await seedReport(runtime, report);
+	}
+
+	/** Twenty-five posts that can still change, each with an answer that changes it, and an outdated ledger. */
+	async function statusWork(runtime: PluginRuntimeTestHost) {
+		for (let i = 0; i < 26; i++) {
+			await seedDelivery(runtime, `posts:e${String(i).padStart(2, "0")}:c1`, {
+				entryId: `e${i}`,
+				status: "sent",
+				postId: `p${i}`,
+				postStatus: "scheduled",
+				createdAt: new Date(NOW.getTime() - (30 - i) * 60_000).toISOString(),
+			});
+		}
+		await respond(runtime, statusAnswer(...Array.from({ length: 25 }, (_, i) => [postNode(`p${i}`)])));
+	}
+
+	it("a sync that runs the status pass and the scan", async () => {
+		host = await newHost();
+		await reportSetup(host, { ...nothingDue(), status: undefined, scan: undefined });
+		await statusWork(host);
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "storagePutMany")).toHaveLength(1);
+		expect(calls).toContain("storagePut");
+		expect(calls).toContain("httpFetch");
+		// A 26th record is left: the pass continues on a catch-up run.
+		expect(calls).toContain("cronSchedule");
+	});
+
+	it("a sync that refreshes the channels", async () => {
+		host = await newHost();
+		await reportSetup(host, { ...nothingDue(), channelsAt: undefined, status: undefined });
+		await seedChannels(host, LI, { fetchedAt: new Date(NOW.getTime() - 25 * HOUR).toISOString() });
+		await respond(
+			host,
+			json({ data: { account: { organizations: [{ id: "org1", name: "Org" }] } } }),
+			json({ data: { o0: [{ id: "c1", organizationId: "org1", name: "n", service: "linkedin", isDisconnected: false, isLocked: false, isQueuePaused: false }] } }),
+			json({ data: { l0: [] } }),
+			json({ data: { c0: { channels: [] } } }),
+		);
+		await openRecords(host, 2);
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "httpFetch")).toHaveLength(4);
+	});
+
+	it("a sync that reads the metrics and a round of aggregates", async () => {
+		host = await newHost();
+		await reportSetup(host, { ...nothingDue(), metrics: undefined, aggregates: undefined });
+		for (let i = 0; i < 3; i++) await seedDelivery(host, `posts:e${i}:c1`, { entryId: `e${i}`, status: "sent", postId: `p${i}`, postStatus: "sent" });
+		await respond(
+			host,
+			metricsAnswer([0, 1, 2].map((i) => postNode(`p${i}`, { metrics: [metric("reactions", i + 1)], metricsUpdatedAt: NOW.toISOString() })), { endCursor: "c", hasNextPage: true }),
+			aggregatesAnswer(30, baseline(1, 2, 3)),
+		);
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "httpFetch")).toHaveLength(2);
+		expect(calls).toContain("storagePutMany");
+		expect(calls).toContain("storagePut");
+	});
+
+	for (const name of ["catchup-a", "catchup-b"]) {
+		it(`a ${name} run that backfills two rounds of aggregates`, async () => {
+			host = await newHost();
+			await reportSetup(host, { ...nothingDue(), aggregates: undefined });
+			await respond(host, aggregatesAnswer(30, baseline(1, 2, 3)), aggregatesAnswer(30, baseline(1, 2, 3)));
+
+			const calls = await bridgeCalls(tick(host, name));
+
+			expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+			expect(calls.filter((c) => c === "httpFetch")).toHaveLength(2);
+			expect(calls).toContain("cronSchedule");
+		});
+	}
+
+	it("a catch-up run that does the status pass and the scan", async () => {
+		host = await newHost();
+		await reportSetup(host, { ...nothingDue(), status: { pending: true, after: "", seen: [] }, scan: { pending: true } });
+		await statusWork(host);
+
+		const calls = await bridgeCalls(tick(host, "catchup-b"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storagePutMany");
+		expect(calls).toContain("storagePut");
+	});
+
+	it("a Refresh run", async () => {
+		host = await newHost();
+		await reportSetup(host, nothingDue());
+		await statusWork(host);
+
+		const calls = await bridgeCalls(tick(host, "refresh"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("httpFetch");
+		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("catchup-a");
+	});
+});
+
+describe("the Analytics view and the widget", () => {
+	async function analyticsSetup(runtime: PluginRuntimeTestHost) {
+		await seedChannels(runtime, FIVE);
+		await seedConfig(runtime, { channels: allOn(FIVE) });
+		await seedLedger(runtime, { a: entry({ engagement: 3, impressions: 9, link: "https://example.org/p" }), b: entry({ postStatus: "scheduled", dueAt: NOW.toISOString() }) });
+		await seedAggregates(runtime, {
+			days: { a: { [today]: { posts: 1, metrics: { reactions: 1, impressions: 4 }, metricsUpdatedAt: NOW.toISOString() } } },
+			ranges: {},
+			progress: { a: { recentOn: today, backTo: today } },
+		});
+		await seedDelivery(runtime, "f1", { status: "failed", error: "nope" });
+	}
+
+	it("a first load, which also starts the watch and schedules the sync", async () => {
+		host = await newHost();
+		await analyticsSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.loadPage(PAGE_PATH));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toEqual(expect.arrayContaining(["kvSet", "cronSchedule", "storageGetMany", "storageCount"]));
+	});
+
+	for (const days of [7, 30, 90]) {
+		it(`the ${days}-day range`, async () => {
+			host = await newHost();
+			await analyticsSetup(host);
+			const calls = await bridgeCalls(() => host!.admin.act(PAGE_PATH, RANGE_ACTION, { value: days }));
+			expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		});
+	}
+
+	it("Refresh", async () => {
+		host = await newHost();
+		await analyticsSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.act(PAGE_PATH, PAGE_REFRESH_ACTION, { value: 90 }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("cronSchedule");
+	});
+
+	it("Retry all failed", async () => {
+		host = await newHost();
+		await analyticsSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.act(PAGE_PATH, RETRY_ALL_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).find((d) => d.error === "nope")?.status).toBe("pending");
+	});
+
+	it("the Setup view", async () => {
+		host = await newHost();
+		await analyticsSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.act(PAGE_PATH, SETUP_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+	});
+
+	it("a widget load", async () => {
+		host = await newHost();
+		await analyticsSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.loadWidget(WIDGET_ID));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storageGetMany");
+	});
+
+	it("the widget's Refresh", async () => {
+		host = await newHost();
+		await analyticsSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.act(`widget:${WIDGET_ID}`, WIDGET_REFRESH_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("cronSchedule");
+	});
+});
+
+describe("the Buffer page", () => {
+	async function pageSetup(runtime: PluginRuntimeTestHost) {
+		await postsCollection(runtime);
+		await seedChannels(runtime, FIVE);
+		await seedConfig(runtime, { channels: allOn(FIVE), collections: { posts: { enabled: true, image: "cover" } } });
+		await seedDelivery(runtime, "f1", { status: "failed", error: "nope" });
+	}
+
+	it("a page load before the watch started", async () => {
+		host = await newHost();
+		await pageSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.loadPage(PAGE_PATH));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("cronSchedule");
+	});
+
+	it("Discover, answered in full", async () => {
+		host = await newHost();
+		await pageSetup(host);
+		await respond(
+			host,
+			json({ data: { account: { organizations: [{ id: "org1", name: "Org" }] } } }),
+			json({ data: { o0: [{ id: "c1", organizationId: "org1", name: "n", service: "linkedin", isDisconnected: false, isLocked: false, isQueuePaused: false }] } }),
+			json({ data: { l0: [{ channelId: "c1", isAtLimit: false, limit: 10, scheduled: 0, sent: 0 }] } }),
+			json({ data: { c0: { channels: [] } } }),
+		);
+		const calls = await bridgeCalls(() => host!.admin.act(PAGE_PATH, DISCOVER_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(host.http.requests()).toHaveLength(4);
+	});
+
+	it("saving a channel", async () => {
+		host = await newHost();
+		await pageSetup(host);
+		const calls = await bridgeCalls(() =>
+			host!.admin.submit(PAGE_PATH, `${CHANNEL_ACTION_PREFIX}a`, { enabled: true, mode: "shareNext", attach: "link", template: "" }),
+		);
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+	});
+
+	it("saving the collections", async () => {
+		host = await newHost();
+		await pageSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.submit(PAGE_PATH, COLLECTIONS_ACTION, { collections: ["posts"], image_posts: "seo" }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+	});
+
+	it("saving the UTM tags", async () => {
+		host = await newHost();
+		await pageSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.submit(PAGE_PATH, UTM_ACTION, { utm: true, source: "buffer", medium: "social" }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+	});
+
+	it("Retry with failed deliveries", async () => {
+		host = await newHost();
+		await pageSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.act(PAGE_PATH, RETRY_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).find((d) => d.error === "nope")?.status).toBe("pending");
+	});
+});
+
+describe("the editor panel", () => {
+	const TWO = FIVE.slice(0, 2);
+
+	async function panelSetup(runtime: PluginRuntimeTestHost, opts: { sent?: boolean } = {}) {
+		await postsCollection(runtime);
+		await seedChannels(runtime, TWO);
+		await seedConfig(runtime, { channels: allOn(TWO), collections: { posts: { enabled: true, image: "cover" } } });
+		await seedState(runtime, watching);
+		const { id } = await publishedPost(runtime);
+		if (opts.sent) {
+			await seedDelivery(runtime, `posts:${id}:a`, { entryId: id, channelId: "a", status: "sent", postId: "p1", postStatus: "sent" });
+			await seedDelivery(runtime, `posts:${id}:b`, { entryId: id, channelId: "b", status: "failed", error: "nope" });
+		}
+		return id;
+	}
+
+	it("a collection that is not shared", async () => {
+		host = await newHost();
+		await postsCollection(host);
+		const { id } = await publishedPost(host);
+		const calls = await bridgeCalls(() => host!.admin.loadEditorPanel(PANEL_ID, "posts", id));
+		expect(calls, calls.join(", ")).toEqual(["kvList"]);
+	});
+
+	it("a load before the first send", async () => {
+		host = await newHost();
+		const id = await panelSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.loadEditorPanel(PANEL_ID, "posts", id));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storageGet");
+	});
+
+	it("saving the choices", async () => {
+		host = await newHost();
+		const id = await panelSetup(host);
+		const calls = await bridgeCalls(() => host!.admin.submitEditorPanel(PANEL_ID, "posts", id, PANEL_SAVE_ACTION, { send_a: false, text_b: "x" }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storagePut");
+	});
+
+	it("a load after the send", async () => {
+		host = await newHost();
+		const id = await panelSetup(host, { sent: true });
+		const calls = await bridgeCalls(() => host!.admin.loadEditorPanel(PANEL_ID, "posts", id));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+	});
+
+	it("Retry", async () => {
+		host = await newHost();
+		const id = await panelSetup(host, { sent: true });
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_RETRY_ACTION, { value: `posts:${id}:b` }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("cronSchedule");
+	});
+
+	it("Send again, rate-limited, which schedules a continuation and stores the reading", async () => {
+		host = await newHost();
+		const id = await panelSetup(host, { sent: true });
+		await respond(host, rateLimited(90));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:a` }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("httpFetch");
+		expect(calls).toContain("cronSchedule");
+	});
+
+	it("Send again, answered", async () => {
+		host = await newHost();
+		const id = await panelSetup(host, { sent: true });
+		await respond(host, created("p2"));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:a` }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host)).filter((d) => d.postId === "p2")).toHaveLength(1);
+	});
+});
+
+describe("the MCP tools", () => {
+	for (const [name, route] of Object.entries(TOOL_ROUTES)) {
+		it(name, async () => {
+			host = await newHost();
+			await seedChannels(host, FIVE);
+			await seedConfig(host, { channels: allOn(FIVE) });
+			await seedLedger(host, { a: entry({ engagement: 3 }) });
+			for (let i = 0; i < 3; i++) await seedDelivery(host, `posts:e1:c${i}`, { channelId: `c${i}`, status: "failed" });
+			const calls = await bridgeCalls(() => host!.transport.invokeRoute(route, { entryId: "e1", days: 90, limit: 50 }));
+			expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+			expect(calls.length).toBeGreaterThanOrEqual(2);
+		});
+	}
+});

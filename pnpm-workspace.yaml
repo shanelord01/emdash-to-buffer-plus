@@ -1,0 +1,13 @@
+# esbuild needs its postinstall to link the platform binary (vitest depends
+# on it); workerd needs its own, because `@emdash-cms/plugin-test` runs the
+# plugin inside the real sandbox rather than a mock.
+#
+# The key is `allowBuilds`, not `onlyBuiltDependencies`: on pnpm 11 the old
+# key is silently ignored and the install ends in ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  esbuild: true
+  workerd: true
+
+# An ignored build is an error, not a warning.
+strictDepBuilds: true
+dangerouslyAllowAllBuilds: false

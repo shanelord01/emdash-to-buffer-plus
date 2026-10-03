@@ -1,0 +1,237 @@
+/**
+ * The plugin's message catalogue.
+ *
+ * Block Kit plugins localise themselves: the host passes the administrator's
+ * locale in `routeCtx.ui`. English is the source and the fallback for every
+ * locale without a catalogue here, and a missing locale never means empty
+ * blocks. A new language is a new object typed against `en`, so a missing
+ * key fails the build. Manifest strings (page label, settings form) stay
+ * static.
+ */
+
+import type { SkipReason } from "./buffer/services.js";
+
+const en = {
+	pageTitle: "Buffer",
+	setupHeader: "Setup",
+	tokenSet: "Buffer API key: set.",
+	tokenMissing:
+		"Buffer API key: not set. Create a personal key in Buffer under Settings > API, then paste it into this plugin's settings. Saving it needs EMDASH_ENCRYPTION_KEY on the server (npx emdash secrets generate).",
+	openSettings: "Open plugin settings",
+	paused: "Sharing is switched off in the plugin's settings. Nothing new is sent.",
+	discover: "Discover channels",
+	discovered: "Found {count} channels.",
+	discoverFailed: "Buffer could not list the channels: {message}",
+	channelsHeader: "Channels",
+	channelsEmpty: "No channels yet. Discover channels once the API key is set.",
+	channelsFetched: "Channels as of {date}.",
+	channelsTruncated: "Only the first {count} Buffer organisations are read.",
+	hintsFromBuffer: "Rules marked \"from Buffer\" come from Buffer's channel configuration, which Buffer marks experimental. The rest are Buffer's documented defaults.",
+	hintsUnavailable: "Buffer's channel configuration did not answer ({message}), so Buffer's documented defaults apply.",
+	colChannel: "Channel",
+	colService: "Service",
+	colHealth: "Health",
+	colSharing: "Sharing",
+	colRules: "Rules",
+	healthOk: "OK",
+	healthDisconnected: "Disconnected",
+	healthLocked: "Locked",
+	healthPaused: "Queue paused",
+	healthAtLimit: "At daily limit",
+	sharingOn: "On",
+	sharingOff: "Off",
+	ruleImageNeeded: "image needed",
+	ruleImageAllowed: "image allowed",
+	ruleImageNever: "no image",
+	ruleLinkCard: "link card",
+	ruleLimit: "{max} characters",
+	ruleNoLimit: "no documented limit",
+	ruleFromBuffer: "from Buffer",
+	channelFormTitle: "{name} ({service})",
+	fieldEnabled: "Share new entries here",
+	fieldMode: "When",
+	modeQueue: "Add to the queue",
+	modeNext: "Share next",
+	modeNow: "Share now",
+	modeDraft: "Save as a draft in Buffer",
+	fieldAttach: "Attach",
+	attachImage: "The entry's image",
+	attachLink: "A link card",
+	attachNone: "Nothing",
+	fieldTemplate: "Text template (leave empty for the default)",
+	templateHelp: "Use {title}, {excerpt} and {url}. Line breaks are kept.",
+	fieldBoard: "Pinterest board",
+	noBoards: "Buffer listed no boards for this channel.",
+	save: "Save",
+	saved: "Saved.",
+	collectionsHeader: "Collections",
+	collectionsEmpty: "No routable collections. Only collections with public pages can be shared.",
+	collectionsHelp: "Entries first published after the plugin started watching are shared. Older entries never are.",
+	fieldCollections: "Share entries from",
+	imageSourceFor: "Image for {collection}",
+	imageSeo: "The SEO image",
+	imageNone: "No image",
+	utmHeader: "Link tags",
+	fieldUtm: "Add UTM tags to links",
+	utmHelp: "Adds utm_source, utm_medium and utm_campaign (the channel's service). Tags already on a link are kept.",
+	fieldUtmSource: "utm_source",
+	fieldUtmMedium: "utm_medium",
+	deliveriesHeader: "Deliveries",
+	failedCount: { one: "{count} delivery failed.", other: "{count} deliveries failed." },
+	retry: "Retry failed",
+	retried: { one: "{count} delivery will be sent again shortly.", other: "{count} deliveries will be sent again shortly." },
+	nothingToRetry: "Nothing to retry.",
+	watchingSince: "Watching for entries published since {date}.",
+	rateLimit: "Buffer requests left: {windows}.",
+	// Analytics page and widget.
+	rangeDays: { one: "{count} day", other: "{count} days" },
+	refresh: "Refresh",
+	refreshScheduled: "Buffer will be checked within a minute or two. Load the page again to see the result.",
+	refreshUnavailable: "This site runs no scheduler, so Buffer cannot be checked now.",
+	openInBuffer: "Open in Buffer",
+	setup: "Setup",
+	backToAnalytics: "Back to analytics",
+	openPage: "Open the Buffer page",
+	nothingYetTitle: "Nothing to show yet",
+	nothingYetNoKey: "Add a Buffer API key in the plugin settings, then turn on a channel and a collection under Setup.",
+	nothingYetNoChannels: "Turn on at least one channel and one collection under Setup. Entries published after that are shared and show up here.",
+	sentLastDays: "Sent, last {days} days",
+	queuedNow: "Queued now",
+	failedLastDays: "Failed, last {days} days",
+	impressionsLastDays: "Impressions, last {days} days",
+	engagementLastDays: "Engagement, last {days} days",
+	queuedNone: "nothing waiting",
+	queuedNext: "next on {date}",
+	queuedWaiting: "waiting to go out",
+	noEarlierPeriod: "no earlier period to compare yet",
+	noneEitherPeriod: "none in either period",
+	upFromNone: "up from none",
+	vsPrevious: "{change} on the previous period",
+	noFigures: "No figures yet",
+	noImpressionsYet: "Buffer has no impression figures for these channels yet",
+	noEngagementYet: "Buffer has no engagement figures for these channels yet",
+	seriesSent: "Sent",
+	seriesFailed: "Failed",
+	seriesEngagement: "Engagement",
+	seriesImpressions: "Impressions",
+	engagementByDay: "Engagement by day",
+	impressionsByDay: "Impressions by day",
+	axisInteractions: "Interactions",
+	axisTimesShown: "Times shown",
+	syncedAgo: "Synced {age}",
+	notSyncedYet: "Not synced yet",
+	todayCounting: "today is still counting",
+	figuresSince: "figures start on {date}, earlier days are still being read",
+	figuresNote:
+		"Engagement adds up reactions, comments, shares, reposts, saves and quotes, as Buffer counts them. Impressions are how often posts were shown on screen. Both cover every post on the channels this plugin shares to, by the day each went out, including posts made in Buffer itself. Buffer refreshes figures about once a day, and a network that does not report a figure is left out rather than counted as zero.",
+	topEntries: "Top entries",
+	topEntriesEmpty: "No figures yet. Buffer adds them about a day after a post goes out.",
+	colEntry: "Entry",
+	colEngagement: "Engagement",
+	colImpressions: "Impressions",
+	colPost: "Post",
+	colSent: "Sent",
+	colFailed: "Failed",
+	colEngagementRate: "Engagement rate",
+	viewPost: "View post",
+	untitled: "Untitled",
+	channelsTableEmpty: "No channels are shared to yet.",
+	channelsNote: "Sent and failed count this plugin's posts. Impressions and engagement rate are Buffer's own figures for the channel over the same days.",
+	failedBanner: { one: "{count} delivery failed. Buffer refused the post.", other: "{count} deliveries failed. Buffer refused the posts." },
+	retryAll: "Retry all failed",
+	publishErrors: { one: "Buffer could not publish {count} post: {message}", other: "Buffer could not publish {count} posts. The latest said: {message}" },
+	publishErrorsHelp: "Fix these in Buffer, where the post can be sent again.",
+	bannerDisconnected: "Disconnected in Buffer: {names}. Reconnect them in Buffer to keep sharing.",
+	bannerLocked: "Locked in Buffer: {names}. Locked channels cannot post.",
+	bannerQueuePaused: "Queue paused in Buffer: {names}. Posts wait until the queue is resumed.",
+	bannerAtLimit: "At today's posting limit in Buffer: {names}.",
+	bannerRateLimited: "Buffer asked the plugin to slow down. Checks resume {time}.",
+	bannerProblem: "Buffer did not answer the last check: {message}",
+	skippedNote: "Not shared to: {list}.",
+	nextQueued: "Next: {title}, {date}",
+	thisWeekNote: "Last 7 days. Engagement covers every post on the shared channels.",
+	reason_serviceUnsupported: "Buffer cannot post to this service from the API.",
+	reason_videoOnly: "This service takes video only.",
+	reason_needsBoard: "Choose a Pinterest board for this channel.",
+	reason_needsImage: "This service needs an image and the entry has none Buffer can fetch.",
+	reason_channelDisconnected: "The channel is disconnected in Buffer.",
+	reason_channelLocked: "The channel is locked in Buffer.",
+	reason_textTooLong: "The text is too long for this network even without the excerpt.",
+	reason_noUrl: "The entry has no public link.",
+	reason_editorSkipped: "Left out for this entry in the editor.",
+	forbidden: "Only administrators can change this.",
+	// Editor panel.
+	panelOutsideEditor: "Open this panel from a saved entry.",
+	panelNotShared: "Entries in this collection are not shared to Buffer. An administrator can turn the collection on under Setup on the Buffer page.",
+	panelNoKey: "No Buffer API key is set, so nothing is shared yet. An administrator adds one in the plugin settings.",
+	panelNoChannels: "No Buffer channel is turned on yet. An administrator turns channels on under Setup on the Buffer page.",
+	panelPaused: "Sharing is switched off in the plugin's settings, so this entry will not be sent when it is published.",
+	panelBeforeHelp: "These choices apply when the entry is first published. Leave the text empty to use the channel's own text. {title}, {excerpt} and {url} are filled in; only the excerpt is shortened to fit.",
+	panelWatchNote: "Entries first published before {date} are never shared.",
+	panelShareTo: "Share to {name} ({service})",
+	panelTextFor: "Text for {name}, up to {max} characters",
+	panelTextForNoLimit: "Text for {name}",
+	panelSaved: "Saved. These choices are used when the entry is first published.",
+	panelAlreadySent: "This entry has already gone to Buffer, so these choices are no longer used.",
+	panelChannelLine: "{name} ({service}): {state}",
+	panelStatePending: "waiting to be sent",
+	panelStatePendingAt: "waiting to be sent, next try {time}",
+	panelStateSending: "being sent now",
+	panelStateUnknown: "checking with Buffer whether the post arrived",
+	panelStateFailed: "failed",
+	panelStateSkipped: "not sent",
+	panelStateQueued: "queued in Buffer for {time}",
+	panelStateAccepted: "accepted by Buffer",
+	panelStatePosted: "posted {time}",
+	panelStatePostedNoTime: "posted",
+	panelStateDraft: "saved as a draft in Buffer",
+	panelStateApproval: "waiting for approval in Buffer",
+	panelStatePublishing: "being published by Buffer",
+	panelStatePostError: "Buffer could not publish it",
+	panelStateGone: "no longer in Buffer",
+	panelBufferSaid: "Buffer said: {message}",
+	panelSentCount: { one: "Sent once to this channel.", other: "Sent {count} times to this channel." },
+	panelRetry: "Retry",
+	panelRetried: "The post will be sent again shortly.",
+	panelNothingToRetry: "There is nothing to retry for this channel.",
+	panelAgain: "Send again",
+	panelAgainTitle: "Send this post again?",
+	panelAgainText: "Buffer gets a second post with the same text for {name}. The first post stays where it is.",
+	panelAgainConfirm: "Send again",
+	panelAgainDeny: "Cancel",
+	panelAgainSent: "Sent to Buffer again.",
+	panelAgainQueued: "The post goes to Buffer again within a minute or two.",
+	panelAgainFailed: "Buffer did not take the post: {message}",
+	panelAgainBusy: "A post to this channel is already on its way. Wait for it before sending again.",
+	panelAgainNothing: "Only a post Buffer took can be sent again.",
+} as const;
+
+type Plural = { one: string; other: string };
+type Catalogue = { readonly [K in keyof typeof en]: string | Plural };
+
+const catalogues: Record<string, Catalogue> = { en };
+
+export type Lang = "en";
+export type MessageKey = keyof typeof en;
+export type Params = Record<string, string | number>;
+
+/** The catalogue for an admin locale; English for every locale without one. */
+export function langOf(_locale: string | undefined): Lang {
+	return "en";
+}
+
+export function t(lang: Lang, key: MessageKey, params: Params = {}): string {
+	const message = (catalogues[lang] ?? en)[key];
+	const template =
+		typeof message === "string"
+			? message
+			: new Intl.PluralRules(lang).select(Number(params.count ?? 0)) === "one"
+				? message.one
+				: message.other;
+	return template.replace(/\{(\w+)\}/g, (match, name: string) => (name in params ? String(params[name]) : match));
+}
+
+export function reasonText(lang: Lang, reason: SkipReason | string): string {
+	const key = `reason_${reason}` as MessageKey;
+	return key in en ? t(lang, key) : reason;
+}

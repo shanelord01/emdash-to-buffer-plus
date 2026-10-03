@@ -1,0 +1,151 @@
+{
+	"$schema": "./node_modules/@emdash-cms/plugin-cli/schemas/emdash-plugin.schema.json",
+
+	"slug": "emdash-to-buffer-plus",
+	"publisher": "did:plc:efxj3t72atnke555mnnmywju",
+
+	"license": "MIT",
+	"author": { "name": "Shane Lord", "url": "https://github.com/shanelord01" },
+	"security": { "url": "https://github.com/shanelord01/emdash-to-buffer-plus/security/advisories/new" },
+	"repo": "https://github.com/shanelord01/emdash-to-buffer-plus",
+
+	// EmDash refuses an install whose host falls outside this range, so it
+	// carries a floor and no ceiling. Never ">=1.0.0": npm carries an
+	// accidental emdash@1.0.0 from April 2026.
+	"release": {
+		"requires": { "env:emdash": ">=1.1.0" }
+	},
+
+	"name": "EmDash to Buffer Plus",
+
+	// The registry refuses a description over 140 graphemes;
+	// `emdash-plugin validate` does not check it. At most five keywords.
+	"description": "Share newly published entries to your Buffer channels, with text fitted to each network, images or link cards, and tracked delivery.",
+	"keywords": ["buffer", "social", "syndication", "sharing", "publishing"],
+
+	// Trust contract: exactly what the code calls.
+	//
+	// `network:request` with `allowedHosts` ["api.buffer.com"]: the only
+	// request the plugin makes is to Buffer's GraphQL API. Images are not
+	// fetched by the plugin; Buffer fetches them itself.
+	//
+	// `content:read`: the content hooks (`content:afterPublish` and
+	// `content:afterSave` require it) and `ctx.content.getPublicUrl()` for
+	// the entry's link.
+	//
+	// `schema:read`: `ctx.schema.listCollections()` on the Buffer page, to
+	// offer routable collections and their image fields.
+	//
+	// `media:read`: `ctx.media.get()` to turn a local image into its public
+	// URL.
+	//
+	// Deliberately absent: `content:write` (the plugin never edits entries),
+	// `network:request:unrestricted`, `users:read`, `email:send`.
+	"capabilities": ["network:request", "content:read", "schema:read", "media:read"],
+	"allowedHosts": ["api.buffer.com"],
+
+	"storage": {
+		// One record per (entry, channel). See src/store/deliveries.ts.
+		//
+		// Every query field is indexed, since storage rejects a where or
+		// orderBy on an undeclared index: `entryId` (has this entry been
+		// handled), `status` (open and failed records), `nextAttemptAt`
+		// (run order), `updatedAt` (the atomic claim's guard), `createdAt`
+		// (pruning, the status pass), `channelId` (per-channel lookups),
+		// `postStatus` (posts that can still change at Buffer), `postId`
+		// (matching Buffer's sent posts and their figures to records).
+		"deliveries": {
+			"indexes": ["entryId", "status", "nextAttemptAt", "updatedAt", "createdAt", "channelId", "postStatus", "postId"]
+		},
+		// Two snapshot rows the Analytics page and the widget read in one
+		// call: "ledger" (one line per delivery) and "aggregates" (Buffer's
+		// figures per channel and day). Read by id only, so no indexes. See
+		// src/store/report.ts.
+		"reports": {
+			"indexes": []
+		},
+		// The editor panel's choices for an entry not sent yet: channels left
+		// out and custom text, one record per entry, read by id. `updatedAt`
+		// is indexed for the retention prune. See src/store/overrides.ts.
+		"overrides": {
+			"indexes": ["updatedAt"]
+		}
+	},
+
+	"admin": {
+		// Credentials and plain values only. Channels, collections, image
+		// sources and UTM tags are on the Buffer page, because they come from
+		// Buffer and the schema, which this generated form cannot list.
+		//
+		// `secret` is what makes EmDash encrypt the key with
+		// EMDASH_ENCRYPTION_KEY (AES-GCM). Without that key, saving fails
+		// with PLUGIN_SETTING_ENCRYPTION_KEY_MISSING rather than storing
+		// plaintext.
+		"settingsSchema": {
+			"accessToken": {
+				"type": "secret",
+				"label": "Buffer API key",
+				"description": "A personal API key from Buffer: Settings > API > Create key. Post metrics need a personal key. Then open the Buffer page to discover your channels."
+			},
+			"enabled": {
+				"type": "boolean",
+				"label": "Share new entries",
+				"default": true,
+				"description": "Turn off to stop sending new entries to Buffer. Settings, channels and delivery history are kept."
+			},
+			"defaultTemplate": {
+				"type": "string",
+				"multiline": true,
+				"label": "Post text",
+				"default": "{title}\n\n{excerpt}\n\n{url}",
+				"description": "The text of each post. {title}, {excerpt} and {url} are filled in, line breaks are kept. The excerpt is shortened to fit each network's limit. A channel can have its own text on the Buffer page."
+			},
+			"retentionDays": {
+				"type": "number",
+				"label": "Keep delivery history for",
+				"default": 180,
+				"min": 30,
+				"max": 730,
+				"description": "Days, 30 to 730. Older delivery records are deleted a hundred at a time."
+			},
+			"syncInterval": {
+				"type": "select",
+				"label": "Sync every",
+				"default": "*/30 * * * *",
+				"options": [
+					{ "value": "*/15 * * * *", "label": "15 minutes" },
+					{ "value": "*/30 * * * *", "label": "30 minutes" },
+					{ "value": "0 * * * *", "label": "Hour" },
+					{ "value": "0 */6 * * *", "label": "6 hours" }
+				],
+				"description": "How often the plugin checks Buffer for post status and figures, and retries anything waiting. Buffer refreshes figures about once a day."
+			}
+		},
+
+		"pages": [{ "path": "/buffer", "label": "Buffer", "icon": "share" }],
+
+		// The last seven days at a glance: sent, failed, engagement and the
+		// next queued post, with a link to the Buffer page.
+		"widgets": [{ "id": "summary", "title": "Buffer", "size": "half" }],
+
+		// The entry editor's Buffer panel, on saved entries of every
+		// collection: it says so itself for a collection that is not shared.
+		// Its route is private and needs plugins:read (src/ui/panel.ts).
+		"editorPanels": [{ "id": "buffer", "title": "Buffer", "route": "panel" }]
+	},
+
+	// The registry page's tabs. Profile-level: they carry across releases.
+	// Each file is capped at 20000 bytes and 2000 graphemes
+	// (tests/sections.test.ts checks both).
+	"sections": {
+		"description": { "file": "docs/registry/description.md" },
+		"installation": { "file": "docs/registry/installation.md" },
+		"faq": { "file": "docs/registry/faq.md" },
+		"changelog": { "file": "docs/registry/changelog.md" },
+		"security": { "file": "docs/registry/security.md" }
+	}
+
+	// No `hooks` and no `routes` here: the authored manifest rejects both.
+	// They live in src/plugin.ts and the build probes them into the wire
+	// manifest.
+}
