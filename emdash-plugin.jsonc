@@ -33,7 +33,7 @@
 	// `content:afterSave` require it) and `ctx.content.getPublicUrl()` for
 	// the entry's link.
 	//
-	// `schema:read`: `ctx.schema.listCollections()` on the Buffer page, to
+	// `schema:read`: `ctx.schema.listCollections()` on the Buffer Plus page, to
 	// offer routable collections and their image fields.
 	//
 	// `media:read`: `ctx.media.get()` to turn a local image into its public
@@ -74,7 +74,7 @@
 
 	"admin": {
 		// Credentials and plain values only. Channels, collections, image
-		// sources and UTM tags are on the Buffer page, because they come from
+		// sources and UTM tags are on the Buffer Plus page, because they come from
 		// Buffer and the schema, which this generated form cannot list.
 		//
 		// `secret` is what makes EmDash encrypt the key with
@@ -85,7 +85,7 @@
 			"accessToken": {
 				"type": "secret",
 				"label": "Buffer API key",
-				"description": "A personal API key from Buffer: Settings > API > Create key. Post metrics need a personal key. Then open the Buffer page to discover your channels."
+				"description": "A personal API key from Buffer: Settings > API > Create key. Post metrics need a personal key. Then open the Buffer Plus page to discover your channels."
 			},
 			"enabled": {
 				"type": "boolean",
@@ -98,7 +98,7 @@
 				"multiline": true,
 				"label": "Post text",
 				"default": "{title}\n\n{excerpt}\n\n{url}",
-				"description": "The text of each post. {title}, {excerpt} and {url} are filled in, line breaks are kept. The excerpt is shortened to fit each network's limit. A channel can have its own text on the Buffer page."
+				"description": "The text of each post. {title}, {description} (the entry's Description or SEO description, also written {excerpt}) and {url} are filled in, line breaks are kept. The description is shortened to fit each network's limit. A channel can have its own text on the Buffer Plus page."
 			},
 			"retentionDays": {
 				"type": "number",
@@ -130,16 +130,17 @@
 			}
 		},
 
-		"pages": [{ "path": "/buffer", "label": "Buffer", "icon": "share" }],
+		// Named for this plugin, Buffer Plus, not for Buffer the service.
+		"pages": [{ "path": "/buffer", "label": "Buffer Plus", "icon": "share" }],
 
 		// The last seven days at a glance: sent, failed, engagement and the
-		// next queued post, with a link to the Buffer page.
-		"widgets": [{ "id": "summary", "title": "Buffer", "size": "half" }],
+		// next queued post, with a link to the Buffer Plus page.
+		"widgets": [{ "id": "summary", "title": "Buffer Plus", "size": "half" }],
 
-		// The entry editor's Buffer panel, on saved entries of every
+		// The entry editor's Buffer Plus panel, on saved entries of every
 		// collection: it says so itself for a collection that is not shared.
 		// Its route is private and needs plugins:read (src/ui/panel.ts).
-		"editorPanels": [{ "id": "buffer", "title": "Buffer", "route": "panel" }]
+		"editorPanels": [{ "id": "buffer", "title": "Buffer Plus", "route": "panel" }]
 	},
 
 	// The registry page's tabs. Profile-level: they carry across releases.

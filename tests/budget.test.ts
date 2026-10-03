@@ -31,6 +31,7 @@ import {
 import {
 	aggregatesAnswer,
 	baseline,
+	dayAgo as dayAgoDay,
 	entry,
 	metric,
 	metricsAnswer,
@@ -333,6 +334,113 @@ describe("report runs", () => {
 			expect(calls).toContain("cronSchedule");
 		});
 	}
+
+	const LIVE = "Free-plan Insights are limited to the last 31 days of history.";
+	const refused = () => json({ data: null, errors: [{ message: LIVE, path: ["a2"] }] });
+	const recentDone = { days: {}, ranges: {}, progress: { c1: { recentOn: today, backTo: dayAgoDay(29) } } };
+
+	it("a sync whose aggregates are refused for the history limit and asked again cut to it", async () => {
+		host = await newHost();
+		await reportSetup(host, { ...nothingDue(), aggregates: undefined });
+		await seedAggregates(host, recentDone);
+		await openRecords(host, 3);
+		await respond(host, refused(), aggregatesAnswer(4, baseline(1, 2, 3)), created("p1"), created("p2"), created("p3"));
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "httpFetch").length).toBeGreaterThanOrEqual(2);
+		expect((await host.inspect.kv.get<{ insightsHistory?: { days: number } }>("report"))?.insightsHistory?.days).toBe(31);
+	});
+
+	it("a sync that reads the metrics, then aggregates refused for the limit, leaves the retry for the next run", async () => {
+		host = await newHost();
+		await reportSetup(host, { ...nothingDue(), metrics: undefined, aggregates: undefined });
+		await seedAggregates(host, recentDone);
+		for (let i = 0; i < 3; i++) await seedDelivery(host, `posts:e${i}:c1`, { entryId: `e${i}`, status: "sent", postId: `p${i}`, postStatus: "sent" });
+		await respond(
+			host,
+			metricsAnswer([0, 1, 2].map((i) => postNode(`p${i}`, { metrics: [metric("reactions", i + 1)], metricsUpdatedAt: NOW.toISOString() })), { endCursor: "c", hasNextPage: true }),
+			refused(),
+		);
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "httpFetch")).toHaveLength(2);
+		const state = await host.inspect.kv.get<{ problem?: unknown; aggregates?: { failedAt?: string } }>("report");
+		expect(state?.problem).toBeUndefined();
+		expect(state?.aggregates?.failedAt).toBeUndefined();
+		// Still due, so a catch-up run asks again cut to the limit.
+		expect(calls).toContain("cronSchedule");
+	});
+
+	for (const name of ["catchup-a", "catchup-b"]) {
+		it(`a ${name} run whose first round is refused for the history limit and asked again cut to it`, async () => {
+			host = await newHost();
+			await reportSetup(host, { ...nothingDue(), aggregates: undefined });
+			await seedAggregates(host, recentDone);
+			await respond(host, refused(), aggregatesAnswer(4, baseline(1, 2, 3)));
+
+			const calls = await bridgeCalls(tick(host, name));
+
+			expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+			expect(calls.filter((c) => c === "httpFetch")).toHaveLength(2);
+			expect(calls).toContain("storagePut");
+		});
+	}
+
+	it("a sync whose metrics page is refused for the limit and asked again, with figures to store and the pass to file", async () => {
+		host = await newHost();
+		await reportSetup(host, { ...nothingDue(), metrics: undefined });
+		for (let i = 0; i < 3; i++) await seedDelivery(host, `posts:e${i}:c1`, { entryId: `e${i}`, status: "sent", postId: `p${i}`, postStatus: "sent" });
+		await seedDelivery(host, "posts:w1:c1", { entryId: "w1", status: "pending" });
+		await seedDelivery(host, "posts:w2:c1", { entryId: "w2", status: "pending" });
+		await respond(
+			host,
+			json({ data: null, errors: [{ message: LIVE, path: ["posts"] }] }),
+			metricsAnswer([0, 1, 2].map((i) => postNode(`p${i}`, { via: "api", channelId: "c1", metrics: [metric("reactions", i + 1)], metricsUpdatedAt: NOW.toISOString() }))),
+			created("x1"),
+			created("x2"),
+		);
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "httpFetch").length).toBeGreaterThanOrEqual(2);
+		expect(calls).toContain("storagePutMany");
+	});
+
+	it("a catch-up run that files a finished pass by origin and reads aggregates", async () => {
+		host = await newHost();
+		await reportSetup(host, {
+			...nothingDue(),
+			aggregates: undefined,
+			metrics: { day: today, at: NOW.toISOString() },
+			originsWork: { day: today, since: dayAgoDay(29), ready: true, channels: ["c1"], days: { c1: { [today]: { buffer: { posts: 1, engagement: 2 } } } }, counts: { c1: { network: 0, buffer: 0, api: 1 } } },
+		});
+		await respond(host, aggregatesAnswer(30, baseline(1, 2, 3)), aggregatesAnswer(30, baseline(1, 2, 3)));
+
+		const calls = await bridgeCalls(tick(host, "catchup-a"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("storageGet");
+		expect((await host.inspect.kv.get<{ origins?: unknown; originsWork?: unknown }>("report"))?.originsWork).toBeUndefined();
+	});
+
+	it("a sync with the weekly check beyond the history limit, then a round", async () => {
+		host = await newHost();
+		const learnt = new Date(NOW.getTime() - 8 * 24 * HOUR).toISOString();
+		await reportSetup(host, { ...nothingDue(), aggregates: undefined, insightsHistory: { days: 31, learntAt: learnt } });
+		await seedAggregates(host, recentDone);
+		await openRecords(host, 3);
+		await respond(host, json({ data: null, errors: [{ message: LIVE, path: ["a0"] }] }), aggregatesAnswer(4, baseline(1, 2, 3)), created("p1"), created("p2"), created("p3"));
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "httpFetch").length).toBeGreaterThanOrEqual(2);
+	});
 
 	it("a catch-up run that does the status pass and the scan", async () => {
 		host = await newHost();

@@ -117,9 +117,9 @@ export async function handleAdmin(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 		await ensureScheduled(ctx, settings.syncInterval, offset);
 	}
 
-	const { ledger, aggregates } = await loadSnapshots(ctx);
+	const { ledger, aggregates, origins } = await loadSnapshots(ctx);
 	const failed = await ctx.storage.deliveries!.count({ status: "failed" });
-	const blocks = renderAnalytics({ lang, settings, stored, ledger, aggregates, failed, range: isAction ? range : DEFAULT_RANGE, canManage, now });
+	const blocks = renderAnalytics({ lang, settings, stored, ledger, aggregates, origins, failed, range: isAction ? range : DEFAULT_RANGE, canManage, now });
 	return toast ? { blocks, toast } : { blocks };
 }
 

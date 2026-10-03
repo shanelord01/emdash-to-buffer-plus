@@ -21,7 +21,7 @@
 
 import { engagementOf, engagementRateOf, impressionsOf } from "../buffer/metrics.js";
 import { OPEN_POST_STATUSES } from "../store/deliveries.js";
-import { addDays, daysBetween, utcDay, type Aggregates, type Day, type Ledger, type LedgerEntry } from "../store/report.js";
+import { addDays, daysBetween, utcDay, type Aggregates, type Day, type Ledger, type LedgerEntry, type OriginMethod, type Origins } from "../store/report.js";
 
 export interface Period {
 	start: Day;
@@ -162,6 +162,8 @@ export function aggregatesSince(agg: Aggregates, channelIds: string[]): Day | un
 export interface ChannelFigures {
 	impressions?: number;
 	engagementRate?: number;
+	/** The days Buffer's figures cover, when its history limit made the window shorter than the range. */
+	figureDays?: number;
 }
 
 /** Buffer's own figures for a channel over the last `days` days, read daily. */
@@ -170,7 +172,11 @@ export function channelFigures(agg: Aggregates, channelId: string, days: number)
 	if (!range || !range.metricsUpdatedAt) return {};
 	const impressions = impressionsOf(range.metrics);
 	const rate = engagementRateOf(range.metrics);
-	return { ...(impressions !== undefined && { impressions }), ...(rate !== undefined && { engagementRate: rate }) };
+	return {
+		...(impressions !== undefined && { impressions }),
+		...(rate !== undefined && { engagementRate: rate }),
+		...(range.days !== undefined && range.days < days && { figureDays: range.days }),
+	};
 }
 
 /** Our posts with figures, most engaging first. */
@@ -211,4 +217,130 @@ export function channelTotals(ledger: Ledger, agg: Aggregates, channelIds: strin
 			...channelFigures(agg, id, days),
 		};
 	});
+}
+
+/**
+ * The network names the charts use, by Buffer's Service value
+ * (reference.md: Service).
+ */
+export const NETWORK_NAMES: Record<string, string> = {
+	bluesky: "Bluesky",
+	facebook: "Facebook",
+	googlebusiness: "Google Business",
+	instagram: "Instagram",
+	linkedin: "LinkedIn",
+	mastodon: "Mastodon",
+	pinterest: "Pinterest",
+	startPage: "Start Page",
+	substack: "Substack",
+	threads: "Threads",
+	tiktok: "TikTok",
+	twitter: "X",
+	whatsapp: "WhatsApp",
+	youtube: "YouTube",
+};
+
+export function networkName(service: string): string {
+	return NETWORK_NAMES[service] ?? service;
+}
+
+export type Origin = "direct" | "buffer" | "unsplit";
+
+export interface OriginSeries {
+	channelId: string;
+	/** The network's name, with the channel's when two shared channels are on the same network. */
+	name: string;
+	origin: Origin;
+	/** Direct figures worked out as the channel's total minus the posts Buffer listed. */
+	derived: boolean;
+	days: DayFigures[];
+}
+
+/**
+ * Each shared channel's figures per day, split by where the posts were
+ * made: on the network ("direct") or through Buffer, this plugin included
+ * ("buffer"). Days the post list has not covered stay in one "unsplit"
+ * series holding the channel's total, so nothing is dropped.
+ *
+ * How a channel is split is the method its last pass recorded:
+ * - `listed`: both origins are the sums of the posts Buffer listed.
+ * - `derived`: Buffer listed no post made on the network, so the direct
+ *   figure is the channel's aggregate for the day minus the listed posts,
+ *   when larger, and only on a day whose listed posts all have figures.
+ * Missing stays missing: a series holds only days with a figure.
+ */
+export function originSeries(
+	agg: Aggregates,
+	origins: Origins,
+	channels: Array<{ id: string; service: string; name: string }>,
+	methods: Record<string, OriginMethod | undefined>,
+	p: Period,
+): OriginSeries[] {
+	const perNetwork = new Map<string, number>();
+	for (const c of channels) perNetwork.set(c.service, (perNetwork.get(c.service) ?? 0) + 1);
+	const out: OriginSeries[] = [];
+	for (const c of channels) {
+		const name = (perNetwork.get(c.service) ?? 0) > 1 ? `${networkName(c.service)} ${c.name}` : networkName(c.service);
+		const method = methods[c.id];
+		const covered = origins.coveredFrom[c.id];
+		const series = {
+			direct: { channelId: c.id, name, origin: "direct" as const, derived: method === "derived", days: [] as DayFigures[] },
+			buffer: { channelId: c.id, name, origin: "buffer" as const, derived: false, days: [] as DayFigures[] },
+			unsplit: { channelId: c.id, name, origin: "unsplit" as const, derived: false, days: [] as DayFigures[] },
+		};
+		const dayRows = agg.days[c.id] ?? {};
+		const originRows = origins.days[c.id] ?? {};
+		const all = new Set([...Object.keys(dayRows), ...Object.keys(originRows)]);
+		for (const day of [...all].sort()) {
+			if (!within(day, p)) continue;
+			const row = dayRows[day];
+			const total: DayFigures | null = row?.metricsUpdatedAt ? figuresOf(day, engagementOf(row.metrics), impressionsOf(row.metrics)) : null;
+			const split = method && covered && daysBetween(covered, day) >= 0;
+			if (!split) {
+				if (total && (total.engagement !== undefined || total.impressions !== undefined)) series.unsplit.days.push(total);
+				continue;
+			}
+			const o = originRows[day] ?? {};
+			if (o.buffer) push(series.buffer.days, figuresOf(day, o.buffer.engagement, o.buffer.impressions));
+			if (method === "listed") {
+				if (o.direct) push(series.direct.days, figuresOf(day, o.direct.engagement, o.direct.impressions));
+			} else if (total && !o.unread) {
+				push(series.direct.days, figuresOf(day, minus(total.engagement, o.buffer?.engagement), minus(total.impressions, o.buffer?.impressions)));
+			}
+		}
+		out.push(series.direct, series.buffer, series.unsplit);
+	}
+	return out.filter((s) => s.days.length > 0);
+}
+
+function figuresOf(day: Day, engagement: number | undefined, impressions: number | undefined): DayFigures {
+	return { day, ...(engagement !== undefined && { engagement }), ...(impressions !== undefined && { impressions }) };
+}
+
+function push(list: DayFigures[], row: DayFigures): void {
+	if (row.engagement !== undefined || row.impressions !== undefined) list.push(row);
+}
+
+/** The channel's total less the listed posts, only when the total is larger. */
+function minus(total: number | undefined, listed: number | undefined): number | undefined {
+	if (total === undefined) return undefined;
+	const rest = total - (listed ?? 0);
+	return rest > 0 ? rest : undefined;
+}
+
+/**
+ * Direct and via-Buffer totals of one figure over the series, or null when
+ * any of it is unsplit (the parts would not add up to the total).
+ */
+export function originTotals(series: OriginSeries[], key: "engagement" | "impressions"): { direct: number; buffer: number } | null {
+	let direct: number | undefined;
+	let buffer: number | undefined;
+	for (const s of series) {
+		const sum = total(s.days, key);
+		if (sum === undefined) continue;
+		if (s.origin === "unsplit") return null;
+		if (s.origin === "direct") direct = (direct ?? 0) + sum;
+		else buffer = (buffer ?? 0) + sum;
+	}
+	return direct !== undefined && buffer !== undefined ? { direct, buffer } : null;
 }

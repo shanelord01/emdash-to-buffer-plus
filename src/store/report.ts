@@ -14,6 +14,9 @@
  * - `aggregates`: Buffer's `aggregatedPostMetrics` per channel and day, and
  *   per channel over the last 7, 30 and 90 days, with the backfill's
  *   progress kept beside the figures it describes.
+ * - `origins`: the same channels' figures per day split by where each post
+ *   was made (PostVia: on the network itself, or through Buffer or its
+ *   API), summed from the metrics read's list of sent posts.
  *
  * One row each because storage writes are counted in rows: rewriting one
  * row is cheaper than touching a row per day per channel.
@@ -28,6 +31,7 @@ import type { Delivery } from "./deliveries.js";
 export const REPORTS = "reports";
 export const LEDGER_ID = "ledger";
 export const AGGREGATES_ID = "aggregates";
+export const ORIGINS_ID = "origins";
 export const REPORT_KEY = "report";
 
 /** The page offers 90 days and compares with the 90 before: 180 days of history. */
@@ -84,9 +88,17 @@ export interface ChannelProgress {
 	recentNext?: Day;
 }
 
+export interface RangeFigures {
+	metrics: MetricMap;
+	metricsUpdatedAt: string | null;
+	/** The days the window really covered, when Buffer's history limit made it shorter than the range. */
+	days?: number;
+}
+
 export interface Aggregates {
 	days: Record<string, Record<Day, AggregateDay>>;
-	ranges: Record<string, Partial<Record<string, { metrics: MetricMap; metricsUpdatedAt: string | null }>>>;
+	/** Per channel, keyed by the range the page offers ("7", "30", "90"). */
+	ranges: Record<string, Partial<Record<string, RangeFigures>>>;
 	progress: Record<string, ChannelProgress>;
 	/** The UTC day the range figures were last read. */
 	rangesOn?: Day;
@@ -97,7 +109,7 @@ export interface Aggregates {
 export interface ReportState {
 	scan?: { after?: string; seen?: string[]; cursor?: string; at?: string; pending?: boolean };
 	status?: { at?: string; after?: string; seen?: string[]; pending?: boolean };
-	metrics?: { day?: Day; org?: number; cursor?: string; at?: string };
+	metrics?: { day?: Day; org?: number; cursor?: string; at?: string; from?: Day; since?: Day };
 	aggregates?: { at?: string; done?: Day; pending?: boolean; failedAt?: string };
 	lastPruneAt?: string;
 	/** The last daily channel refresh, whether it worked or not. */
@@ -116,9 +128,84 @@ export interface ReportState {
 	 * Not a failure: posts still go out.
 	 */
 	headroom?: { at: string; until: string; window: number };
+	/**
+	 * How far back Buffer gives figures on the account's plan, learnt from
+	 * Buffer's own refusal (src/buffer/history.ts). Absent while Buffer has
+	 * refused nothing for its age. `checkedAt` is the last time a day just
+	 * beyond the limit was asked for, to notice a plan that now goes further.
+	 */
+	insightsHistory?: { days: number; learntAt: string; checkedAt?: string };
+	/**
+	 * The last finished pass of the metrics read over posts by origin: when,
+	 * the first day it covered, and per channel the posts Buffer listed by
+	 * PostVia and how the page splits that channel's figures.
+	 */
+	origins?: { at: string; since: Day; channels: Record<string, OriginSummary> };
+	/** Sums of a pass that spans several pages, until its last page is read. */
+	originsWork?: OriginWork;
 	/** The chained one-shot run scheduled last. */
 	chain?: { next: string; at: string };
 	lastSyncAt?: string;
+}
+
+/** Figures summed over posts. `engagement` and `impressions` are absent when no post reported them. */
+export interface OriginSum {
+	posts: number;
+	engagement?: number;
+	impressions?: number;
+}
+
+/** One channel's day, split by where the posts were made. */
+export interface OriginDay {
+	/** PostVia `network`: made on the network itself. */
+	direct?: OriginSum;
+	/** PostVia `buffer` or `api`: made in Buffer, by this plugin or another API tool. */
+	buffer?: OriginSum;
+	/** Posts listed whose figures Buffer has not read yet (`metricsUpdatedAt` null). */
+	unread?: number;
+}
+
+/**
+ * - `listed`: Buffer's post list had posts made on the network, so both
+ *   origins are summed from it.
+ * - `derived`: it had none, so the direct figure is the channel's
+ *   aggregate for the day minus the posts listed (when larger).
+ */
+export type OriginMethod = "listed" | "derived";
+
+export interface OriginSummary {
+	method: OriginMethod;
+	counts: { network: number; buffer: number; api: number };
+}
+
+export interface OriginWork {
+	day: Day;
+	/** The first day the pass counts. */
+	since: Day;
+	/** Every page is read: the origins phase files it. */
+	ready?: boolean;
+	/** The channels the pass covered, so a channel with no posts is filed as empty. */
+	channels?: string[];
+	days: Record<string, Record<Day, OriginDay>>;
+	counts: Record<string, OriginSummary["counts"]>;
+}
+
+export interface Origins {
+	days: Record<string, Record<Day, OriginDay>>;
+	/** Per channel, the oldest day a pass covered: inside it, a day with no entry had no posts listed. */
+	coveredFrom: Record<string, Day>;
+}
+
+export function emptyOrigins(): Origins {
+	return { days: {}, coveredFrom: {} };
+}
+
+export function parseOrigins(raw: unknown): Origins {
+	if (!isRecord(raw)) return emptyOrigins();
+	return {
+		days: isRecord(raw.days) ? (raw.days as Origins["days"]) : {},
+		coveredFrom: isRecord(raw.coveredFrom) ? (raw.coveredFrom as Origins["coveredFrom"]) : {},
+	};
 }
 
 export function parseReportState(raw: unknown): ReportState {

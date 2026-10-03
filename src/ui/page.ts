@@ -24,7 +24,7 @@ import { channelBlocker, ruleFor, supportsLinkCard, textLimit, type ResolvedRule
 import { reasonText, t, type Lang } from "../i18n.js";
 import type { PluginSettings } from "../settings.js";
 import { channelConfig, hintsFor, latestRateLimit, limitFor, type CollectionConfig, type Stored } from "../store/kv.js";
-import { AGGREGATES_ID, LEDGER_ID, parseAggregates, parseLedger, REPORTS, type Aggregates, type Ledger, type RangeDays } from "../store/report.js";
+import { AGGREGATES_ID, LEDGER_ID, ORIGINS_ID, parseAggregates, parseLedger, parseOrigins, REPORTS, type Aggregates, type Ledger, type Origins, type RangeDays } from "../store/report.js";
 import { ANALYTICS_ACTION, headroomPausedUntil } from "./analytics.js";
 import {
 	actions,
@@ -95,9 +95,9 @@ export async function loadCollectionsAndFailures(ctx: PluginContext): Promise<{ 
 /**
  * The snapshot rows the analytics view and the widget read, in one call.
  */
-export async function loadSnapshots(ctx: PluginContext): Promise<{ ledger: Ledger; aggregates: Aggregates }> {
-	const rows = await ctx.storage[REPORTS]!.getMany([LEDGER_ID, AGGREGATES_ID]);
-	return { ledger: parseLedger(rows.get(LEDGER_ID)), aggregates: parseAggregates(rows.get(AGGREGATES_ID)) };
+export async function loadSnapshots(ctx: PluginContext): Promise<{ ledger: Ledger; aggregates: Aggregates; origins: Origins }> {
+	const rows = await ctx.storage[REPORTS]!.getMany([LEDGER_ID, AGGREGATES_ID, ORIGINS_ID]);
+	return { ledger: parseLedger(rows.get(LEDGER_ID)), aggregates: parseAggregates(rows.get(AGGREGATES_ID)), origins: parseOrigins(rows.get(ORIGINS_ID)) };
 }
 
 export function renderSetup(input: PageInput): PageBlock[] {
@@ -140,6 +140,8 @@ function setupSection(input: PageInput): PageBlock[] {
 		else if (cache.hints && Object.keys(cache.hints).length > 0) blocks.push(context(t(lang, "hintsFromBuffer", { time })));
 		else blocks.push(context(t(lang, "hintsNone", { time })));
 	}
+	const origins = originsLine(input);
+	if (origins) blocks.push(context(origins));
 
 	const channels = cache?.channels ?? [];
 	blocks.push(
@@ -337,4 +339,25 @@ export function collectionsFromForm(
 
 function day(iso: string): string {
 	return iso.slice(0, 10);
+}
+
+/**
+ * How the Analytics page splits each shared channel's figures by origin,
+ * with the posts Buffer listed in the last pass by PostVia: the first live
+ * pass shows whether Buffer's post list includes posts made directly on the
+ * network. Read from the report state, so it costs no bridge call.
+ */
+export function originsLine(input: Pick<PageInput, "lang" | "stored" | "settings">): string | null {
+	const { lang, stored } = input;
+	const shared = (stored.channels?.channels ?? []).filter((c) => stored.config.channels[c.id]?.enabled);
+	if (shared.length === 0 || !input.settings.accessToken) return null;
+	const summary = stored.report.origins;
+	if (!summary) return t(lang, "originsNotRead");
+	const list = shared.flatMap((c) => {
+		const row = summary.channels[c.id];
+		if (!row) return [];
+		const name = c.displayName || c.name;
+		return [t(lang, row.method === "listed" ? "originListed" : "originDerived", { name, ...row.counts })];
+	});
+	return list.length > 0 ? t(lang, "originsSince", { date: day(summary.since), list: list.join("; ") }) : t(lang, "originsNotRead");
 }

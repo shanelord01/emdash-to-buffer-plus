@@ -5,6 +5,11 @@
  * Line breaks are kept exactly as the template has them. Only runs of three
  * or more line breaks left by an empty `{excerpt}` are closed up to one blank
  * line, and spaces at the ends of lines are trimmed.
+ *
+ * `{description}` is another name for `{excerpt}`: the same text (the
+ * entry's excerpt, SEO description, description or summary field, see
+ * `entryExcerpt`), shortened the same way. Sites often label that field
+ * "Description", so a template may use either name, or both.
  */
 
 import type { CountRule } from "../buffer/services.js";
@@ -15,11 +20,14 @@ export interface TemplateValues {
 	url: string;
 }
 
-const TAG = /\{(title|excerpt|url)\}/gi;
+const TAG = /\{(title|excerpt|description|url)\}/gi;
 const ELLIPSIS = "…";
 
 export function renderTemplate(template: string, values: TemplateValues): string {
-	const filled = template.replace(TAG, (_match, tag: string) => values[tag.toLowerCase() as keyof TemplateValues] ?? "");
+	const filled = template.replace(TAG, (_match, tag: string) => {
+		const key = tag.toLowerCase();
+		return key === "description" ? values.excerpt : (values[key as keyof TemplateValues] ?? "");
+	});
 	return tidy(filled);
 }
 
@@ -107,7 +115,8 @@ export type FitResult = { ok: true; text: string; shortened: boolean } | { ok: f
 
 /**
  * Render the template and fit it under `max` by shortening the excerpt, with
- * an ellipsis, down to nothing if need be. The title and the URL are never
+ * an ellipsis, down to nothing if need be. `{excerpt}` and `{description}`
+ * are the same value, so a template with both shortens both identically. The title and the URL are never
  * cut. When the text still does not fit without any excerpt, the result says
  * so and the channel is skipped with a reason.
  */
