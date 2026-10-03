@@ -16,13 +16,25 @@
  *   hook (`src/publish/pipeline.ts`);
  * - an entry published before the plugin started watching, with no
  *   records: a line saying it was not shared automatically, and for
- *   administrators the same choices plus Share now (behind a confirm
- *   dialog), which sends this one entry through the normal pipeline
- *   (`shareNow`) without moving the watch;
+ *   administrators the same choices plus Share now (behind a
+ *   confirmation step), which sends this one entry through the normal
+ *   pipeline (`shareNow`) without moving the watch;
  * - after: each channel's latest delivery (waiting, queued with its time,
  *   posted with a link to the live post, failed with Buffer's reason and a
- *   Retry, skipped with its reason), and "Send again" behind a confirm
- *   dialog.
+ *   Retry, skipped with its reason), and "Send again" behind a
+ *   confirmation step.
+ *
+ * Confirmation is a step of the panel, not the host's dialog. The first
+ * press of Share now or Send again re-renders the panel as a question with
+ * the channels named, and only the confirm button acts. Cancel goes back.
+ * Block Kit keeps no state, so the step is the action id, and Send again's
+ * record id rides in the button's value. Every guard runs again on the
+ * confirm press. The host's button `confirm` dialog (EmDash 1.1,
+ * @emdash-cms/blocks ButtonElementComponent) draws its title, text and
+ * buttons inside kumo's Dialog with no padding, flush against the edges,
+ * and a plugin cannot style it: https://github.com/emdash-cms/emdash/issues/3644.
+ * Once EmDash fixes that, `confirm` on the first button can replace the
+ * step again.
  *
  * The route needs `plugins:read` (editors and administrators). Retry and
  * Send again also need `plugins:manage`, checked here from the attested
@@ -33,13 +45,16 @@
  * - a load before the first send: KV, settings, the entry's deliveries,
  *   the entry itself (is it older than the watch?), its override (5); a
  *   save writes the override instead of reading it (5);
- * - Share now: KV, settings, the entry's deliveries, the entry, its
- *   override (5), the public URL and media lookup (7), then the claim and
- *   as many sends as fit with the results, or a continuation (10);
+ * - Share now, first press (the question) and Cancel: KV, settings, the
+ *   entry's deliveries, the entry, its override (5);
+ * - Share now, confirmed: KV, settings, the entry's deliveries, the entry,
+ *   its override (5), the public URL and media lookup (7), then the claim
+ *   and as many sends as fit with the results, or a continuation (10);
  * - a load after: KV, settings, the entry's deliveries (3);
  * - Retry: those three, the record, the continuation (5);
- * - Send again: those three, the claim, the post, the result, and a
- *   continuation or the rate-limit reading when Buffer answers so (7).
+ * - Send again, first press: those three (3);
+ * - Send again, confirmed: those three, the claim, the post, the result,
+ *   and a continuation or the rate-limit reading when Buffer answers so (7).
  */
 
 import type { PluginContext, SandboxedRouteContext } from "emdash/plugin";
@@ -54,7 +69,7 @@ import { DELIVERIES, POST_NOT_FOUND, type Delivery } from "../store/deliveries.j
 import { channelConfig, hintsFor, readStored, type Stored } from "../store/kv.js";
 import { MAX_OVERRIDE_TEXT, OVERRIDES, overrideId, parseOverride, type EntryOverride } from "../store/overrides.js";
 import { capText, isRecord } from "../values.js";
-import { actions, button, context, empty, form, link, section, shownWhen, textInput, toggle, type ActionElement, type FormField, type PageBlock } from "./blocks.js";
+import { actions, banner, button, context, empty, form, link, section, shownWhen, textInput, toggle, type ActionElement, type FormField, type PageBlock } from "./blocks.js";
 import { formatCount, formatTime } from "./format.js";
 import { ROLE_ADMIN } from "./handlers.js";
 import { PAGE_PATH } from "./page.js";
@@ -63,8 +78,16 @@ export const PANEL_ID = "buffer";
 export const PANEL_ROUTE = "panel";
 export const PANEL_SAVE_ACTION = "buffer:panel:save";
 export const PANEL_RETRY_ACTION = "buffer:panel:retry";
+/** Send again's first press: asks. The value is the record's id. */
 export const PANEL_AGAIN_ACTION = "buffer:panel:again";
+/** Share now's first press: asks. */
 export const PANEL_SHARE_ACTION = "buffer:panel:share";
+/** Share now confirmed: shares. */
+export const PANEL_SHARE_CONFIRM_ACTION = "buffer:panel:share:confirm";
+/** Send again confirmed: sends. The value is the record's id. */
+export const PANEL_AGAIN_CONFIRM_ACTION = "buffer:panel:again:confirm";
+/** Cancel on either question: the panel as it was. */
+export const PANEL_CANCEL_ACTION = "buffer:panel:cancel";
 
 /** An entry as `ctx.content.get()` returns it. */
 type ContentItem = NonNullable<Awaited<ReturnType<NonNullable<PluginContext["content"]>["get"]>>>;
@@ -120,6 +143,10 @@ export async function handlePanel(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 	};
 
 	if (isAction && actionId === PANEL_SHARE_ACTION) {
+		const refusal = canManage ? (records.length > 0 ? t(lang, "panelShareExists") : await shareRefusal(settings, stored, lang, await loadItem(), loadOverride)) : t(lang, "forbidden");
+		if (refusal) toast = { message: refusal, type: "error" };
+		else return { blocks: renderShareQuestion(lang, shareableChannels(stored, await loadOverride())) };
+	} else if (isAction && actionId === PANEL_SHARE_CONFIRM_ACTION) {
 		if (!canManage) toast = { message: t(lang, "forbidden"), type: "error" };
 		// A second press, or a second administrator: the first one's records win.
 		else if (records.length > 0) toast = { message: t(lang, "panelShareExists"), type: "error" };
@@ -128,13 +155,17 @@ export async function handlePanel(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 			toast = shared.toast;
 			records.push(...shared.rows);
 		}
-	} else if (isAction && (actionId === PANEL_RETRY_ACTION || actionId === PANEL_AGAIN_ACTION)) {
+	} else if (isAction && (actionId === PANEL_RETRY_ACTION || actionId === PANEL_AGAIN_ACTION || actionId === PANEL_AGAIN_CONFIRM_ACTION)) {
 		const target = records.find((r) => r.id === input.value);
 		if (!canManage) toast = { message: t(lang, "forbidden"), type: "error" };
 		else if (actionId === PANEL_RETRY_ACTION) {
 			const back = target ? await retryOne(ctx, stored, target, now) : null;
 			if (back && target) target.data = back;
 			toast = back ? { message: t(lang, "panelRetried"), type: "success" } : { message: t(lang, "panelNothingToRetry"), type: "error" };
+		} else if (actionId === PANEL_AGAIN_ACTION) {
+			const refusal = againRefusal(records, target, lang);
+			if (refusal) toast = { message: refusal, type: "error" };
+			else return { blocks: renderAgainQuestion(lang, target!) };
 		} else {
 			toast = await sendAgain(ctx, meter, settings, stored, records, target, lang, now);
 		}
@@ -147,6 +178,7 @@ export async function handlePanel(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 			toast = { message: t(lang, "panelSaved"), type: "success" };
 		}
 	}
+	// PANEL_CANCEL_ACTION needs nothing more: the panel is drawn as it is.
 
 	let blocks: PageBlock[];
 	if (records.length > 0) {
@@ -162,10 +194,29 @@ export async function handlePanel(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 }
 
 /**
- * Share now, after the checks a press must pass: a key and the master
- * switch, the entry published now and first published before the watch,
- * and at least one channel left in. Returns the records written, for the
- * panel to show.
+ * Why Share now cannot go ahead, or null: no key or the master switch off,
+ * the entry not published now or published after the watch began, or
+ * every channel left out. Checked on the first press and again on the
+ * confirm press.
+ */
+async function shareRefusal(
+	settings: PluginSettings,
+	stored: Stored,
+	lang: Lang,
+	item: ContentItem | null,
+	loadOverride: () => Promise<EntryOverride | null>,
+): Promise<string | null> {
+	if (!settings.accessToken) return t(lang, "panelNoKey");
+	if (!settings.enabled) return t(lang, "panelShareOff");
+	if (!item || item.status !== "published") return t(lang, "panelShareNotPublished");
+	if (!publishedBeforeWatch(item, stored.state.watchSince)) return t(lang, "panelShareNotOld");
+	if (shareableChannels(stored, await loadOverride()).length === 0) return t(lang, "panelShareNoChannel");
+	return null;
+}
+
+/**
+ * Share now, after the checks a press must pass (`shareRefusal`). Returns
+ * the records written, for the panel to show.
  */
 async function shareFromPanel(
 	ctx: PluginContext,
@@ -179,12 +230,9 @@ async function shareFromPanel(
 	loadOverride: () => Promise<EntryOverride | null>,
 ): Promise<{ toast: Toast; rows: Row[] }> {
 	const refuse = (message: string) => ({ toast: { message, type: "error" as const }, rows: [] });
-	if (!settings.accessToken) return refuse(t(lang, "panelNoKey"));
-	if (!settings.enabled) return refuse(t(lang, "panelShareOff"));
-	if (!item || item.status !== "published") return refuse(t(lang, "panelShareNotPublished"));
-	if (!publishedBeforeWatch(item, stored.state.watchSince)) return refuse(t(lang, "panelShareNotOld"));
+	const refusal = await shareRefusal(settings, stored, lang, item, loadOverride);
+	if (refusal || !item) return refuse(refusal ?? t(lang, "panelShareNotPublished"));
 	const override = await loadOverride();
-	if (shareableChannels(stored, override).length === 0) return refuse(t(lang, "panelShareNoChannel"));
 
 	const ref: EntryRef = {
 		collection,
@@ -223,12 +271,8 @@ async function sendAgain(
 	lang: Lang,
 	now: Date,
 ): Promise<Toast> {
-	if (!target || target.data.status !== "sent") return { message: t(lang, "panelAgainNothing"), type: "error" };
-	// A double press, or a second editor at the same moment, must not post twice.
-	const latest = latestByChannel(records).get(target.data.channelId);
-	if (latest && ["pending", "sending", "unknown"].includes(latest.row.data.status)) {
-		return { message: t(lang, "panelAgainBusy"), type: "error" };
-	}
+	const refusal = againRefusal(records, target, lang);
+	if (refusal || !target) return { message: refusal ?? t(lang, "panelAgainNothing"), type: "error" };
 	const row = againRecord(target, now);
 	records.push(row);
 	await sendPrepared(ctx, meter, settings, stored, [row], now);
@@ -236,6 +280,33 @@ async function sendAgain(
 	if (result.status === "sent") return { message: t(lang, "panelAgainSent"), type: "success" };
 	if (result.status === "failed") return { message: t(lang, "panelAgainFailed", { message: result.error ?? "" }), type: "error" };
 	return { message: t(lang, "panelAgainQueued"), type: "success" };
+}
+
+/** Why Send again cannot go ahead, or null. Checked on the first press and again on the confirm press. */
+function againRefusal(records: Row[], target: Row | undefined, lang: Lang): string | null {
+	if (!target || target.data.status !== "sent") return t(lang, "panelAgainNothing");
+	// A double press, or a second editor at the same moment, must not post twice.
+	const latest = latestByChannel(records).get(target.data.channelId);
+	if (latest && ["pending", "sending", "unknown"].includes(latest.row.data.status)) return t(lang, "panelAgainBusy");
+	return null;
+}
+
+/** The question Share now's first press asks: how many channels, which, and what happens. */
+export function renderShareQuestion(lang: Lang, channels: Array<{ id: string; name: string; displayName?: string | null; service: string }>): PageBlock[] {
+	return [
+		banner({ title: t(lang, "panelShareTitle", { count: channels.length }), description: t(lang, "panelShareText"), blockId: "buffer:panel:question" }),
+		...channels.map((c) => section(t(lang, "panelQuestionChannel", { name: c.displayName || c.name, service: c.service }), { blockId: `buffer:panel:question:${c.id}` })),
+		actions([button(PANEL_SHARE_CONFIRM_ACTION, t(lang, "panelShareConfirm"), { style: "primary" }), button(PANEL_CANCEL_ACTION, t(lang, "panelShareDeny"), { style: "secondary" })]),
+	];
+}
+
+/** The question Send again's first press asks. The record's id rides in the confirm button's value. */
+export function renderAgainQuestion(lang: Lang, target: Row): PageBlock[] {
+	const name = target.data.channelName;
+	return [
+		banner({ title: t(lang, "panelAgainTitle", { name, service: target.data.service }), description: t(lang, "panelAgainText", { name }), blockId: "buffer:panel:question" }),
+		actions([button(PANEL_AGAIN_CONFIRM_ACTION, t(lang, "panelAgainConfirm"), { style: "primary", value: target.id }), button(PANEL_CANCEL_ACTION, t(lang, "panelAgainDeny"), { style: "secondary" })]),
+	];
 }
 
 /** The override a save asks for. Only channels that are on are kept, and text is capped. */
@@ -318,9 +389,9 @@ export function renderBeforeSend(input: { lang: Lang; settings: PluginSettings; 
 
 /**
  * An entry first published before the watch, for an administrator: the
- * line, the same choices, and Share now behind a confirm dialog. A Block
- * Kit form's submit takes no confirm, so the choices are saved first and
- * the button shares with what was saved.
+ * line, the same choices, and Share now, which asks first
+ * (`renderShareQuestion`). A Block Kit form's submit takes no confirm, so
+ * the choices are saved first and the button shares with what was saved.
  */
 export function renderBeforeWatch(input: { lang: Lang; settings: PluginSettings; stored: Stored; override: EntryOverride | null }): PageBlock[] {
 	const { lang, settings, stored, override } = input;
@@ -340,15 +411,8 @@ export function renderBeforeWatch(input: { lang: Lang; settings: PluginSettings;
 	else if (settings.enabled) {
 		out.push(
 			actions([
-				button(PANEL_SHARE_ACTION, t(lang, "panelShareNow"), {
-					style: "primary",
-					confirm: {
-						title: t(lang, "panelShareTitle", { count }),
-						text: t(lang, "panelShareText"),
-						confirm: t(lang, "panelShareConfirm"),
-						deny: t(lang, "panelShareDeny"),
-					},
-				}),
+				// No host `confirm`: its dialog has no padding (emdash-cms/emdash#3644). The first press asks in the panel.
+				button(PANEL_SHARE_ACTION, t(lang, "panelShareNow"), { style: "primary" }),
 			]),
 		);
 	}
@@ -382,17 +446,8 @@ export function renderDeliveries(input: { lang: Lang; records: Row[]; canManage:
 		if (canManage && d.status === "failed") elements.push(button(PANEL_RETRY_ACTION, t(lang, "panelRetry"), { style: "primary", value: row.id }));
 		if (canManage && d.status === "sent") {
 			elements.push(
-				button(PANEL_AGAIN_ACTION, t(lang, "panelAgain"), {
-					style: "secondary",
-					value: row.id,
-					confirm: {
-						title: t(lang, "panelAgainTitle"),
-						text: t(lang, "panelAgainText", { name: d.channelName }),
-						confirm: t(lang, "panelAgainConfirm"),
-						deny: t(lang, "panelAgainDeny"),
-						style: "danger",
-					},
-				}),
+				// No host `confirm`: its dialog has no padding (emdash-cms/emdash#3644). The first press asks in the panel.
+				button(PANEL_AGAIN_ACTION, t(lang, "panelAgain"), { style: "secondary", value: row.id }),
 			);
 		}
 		if (elements.length > 0) out.push(actions(elements));

@@ -17,7 +17,6 @@ import type {
 	BannerBlock,
 	ButtonElement,
 	ChartBlock,
-	ChartSeries,
 	CheckboxElement,
 	ColumnsBlock,
 	ConfirmDialog,
@@ -204,21 +203,96 @@ export function columns(cols: PageBlock[][], opts?: { blockId?: string }): Colum
 	};
 }
 
-export function timeseries(
-	series: ChartSeries[],
-	opts?: { blockId?: string; height?: number; style?: "line" | "bar"; gradient?: boolean; yAxisName?: string },
-): ChartBlock {
+/** One line or bar series of a daily chart: a value per label, null where the day has none. */
+export interface DailySeries {
+	name: string;
+	data: Array<number | null>;
+}
+
+/** The host palette's first colour, the same in light and dark mode (kumo ChartPalette.categorical(0)). */
+const FIRST_COLOUR = { r: 66, g: 144, b: 240 };
+
+/**
+ * A chart of one value per day, drawn as `chart_type: "custom"` with a
+ * category x-axis of day labels ("23 Sept").
+ *
+ * Why not `timeseries`: EmDash 1.1 draws it with kumo's TimeseriesChart,
+ * whose tooltip formats the x value with a fixed Intl.DateTimeFormat (month,
+ * day, hour, minute, second) in the viewer's zone, so a UTC day showed as
+ * "23 Sept, 10:00:00" in Sydney. No timestamp gives a date alone. Its
+ * series take only [number, number] points, so a day with no figure cannot
+ * be a gap and the axis cannot span days without points: it ran from the
+ * first point to the last and joined them with a straight line. A custom
+ * chart's tooltip is ECharts' own: the category label as the header, a
+ * row per series and "-" for a missing day. The host strips every
+ * `formatter` key and registers no legend, so the options are plain data
+ * and series are told apart in the tooltip, as on the timeseries chart.
+ * Everything else copies kumo's timeseries options (axes, dashed split
+ * lines, grid, a gradient under a single line, bars stacked).
+ */
+export function dailyChart(opts: {
+	labels: string[];
+	series: DailySeries[];
+	style: "line" | "bar";
+	height: number;
+	yAxisName?: string;
+	gradient?: boolean;
+	blockId?: string;
+}): ChartBlock {
+	const { r, g, b } = FIRST_COLOUR;
+	const gradient = opts.gradient && opts.style === "line" && opts.series.length === 1;
+	const series = opts.series.map((s) => ({
+		type: opts.style,
+		name: s.name,
+		data: s.data,
+		emphasis: { focus: "series" },
+		...(opts.style === "bar"
+			? { stack: "total" }
+			: {
+					// A day between two missing days is a point of its own, so every point gets its mark.
+					showSymbol: true,
+					showAllSymbol: true,
+					symbolSize: 4,
+					connectNulls: false,
+				}),
+		...(gradient && {
+			areaStyle: {
+				color: {
+					type: "linear",
+					x: 0,
+					y: 0,
+					x2: 0,
+					y2: 1,
+					colorStops: [
+						{ offset: 0, color: `rgba(${r}, ${g}, ${b}, 0.4)` },
+						{ offset: 1, color: `rgba(${r}, ${g}, ${b}, 0)` },
+					],
+				},
+			},
+		}),
+	}));
 	return {
 		type: "chart",
 		config: {
-			chart_type: "timeseries",
-			series,
-			...(opts?.style !== undefined && { style: opts.style }),
-			...(opts?.yAxisName !== undefined && { y_axis_name: opts.yAxisName }),
-			...(opts?.height !== undefined && { height: opts.height }),
-			...(opts?.gradient !== undefined && { gradient: opts.gradient }),
+			chart_type: "custom",
+			height: opts.height,
+			options: {
+				aria: { enabled: true },
+				tooltip: { trigger: "axis" },
+				xAxis: { type: "category", data: opts.labels, boundaryGap: opts.style === "bar", axisLine: { show: false }, splitLine: { show: false } },
+				yAxis: {
+					type: "value",
+					minInterval: 1,
+					...(opts.yAxisName !== undefined && { name: opts.yAxisName, nameLocation: "middle", nameGap: 40 }),
+					axisTick: { show: true },
+					axisLabel: { margin: 15 },
+					splitLine: { show: true, lineStyle: { type: "dashed", width: 1 } },
+				},
+				grid: { left: opts.yAxisName !== undefined ? 30 : 24, right: 24, top: 24, bottom: 24 },
+				series,
+			},
 		},
-		...(opts?.blockId !== undefined && { block_id: opts.blockId }),
+		...(opts.blockId !== undefined && { block_id: opts.blockId }),
 	};
 }
 

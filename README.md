@@ -17,6 +17,20 @@ report what you find in the repository's issues.
 
 ## What's new
 
+**0.1.3, 3 October 2026**
+- The engagement and impressions charts cover every day of the range. A
+  day with no posts counts as 0, so one post on one day is a single peak
+  instead of a line held flat between posts. Days Buffer has not given
+  figures for, and figures a network does not report, are left as gaps.
+- The sent and failed chart covers the whole range as well.
+- Chart tooltips show the day ("23 Sept") without a time.
+- Share now and Send again ask for confirmation inside the editor panel,
+  naming the channels, instead of in a pop-up whose text ran into its
+  edges.
+- The Setup view now says older entries can be shared with Share now.
+- No new permissions and no MCP tool output changes, so Agent access
+  stays on after the update.
+
 **0.1.2, 3 October 2026**
 - Buffer limits how far back figures go by plan: the Free plan gives the
   last 31 days. The plugin now learns that limit from Buffer's answer,
@@ -332,6 +346,13 @@ Setup view shows which way each channel was split and how many posts
 Buffer listed by origin. Days the post list does not cover yet show as
 "(Not split)".
 
+The charts cover every day of the range, or of what your Buffer plan
+gives. A day the post list covers with no posts of that origin is 0. A
+day without figures yet, and a figure the network does not report, is a
+gap, never a 0. Hovering shows the day and each line's figure, with "-"
+for a gap. With many channels over a long range, each chart keeps its
+busiest lines and says so.
+
 They cover up to ten shared channels. Buffer refreshes figures about once
 a day, so a new post shows figures a day or so after it goes out. The
 comparison with the previous period appears once the stored history
@@ -390,14 +411,15 @@ an entry is being created.
   then publish.
 - An entry first published before the plugin started watching: a line
   saying it was not shared automatically. Administrators also get the
-  same choices and Share now, which asks for confirmation and then sends
+  same choices and Share now, which asks in the panel, naming the
+  channels, and then sends
   this entry, and only this one, as if it had just been published. Its
   posts show "Shared by hand". Editors see the line and a link to the
   Buffer Plus page.
 - After: each channel's state, the time a queued post is due (in UTC), a
   link to the live post, Buffer's reason when it failed, and the skip
   reason when it was skipped. Administrators also see Retry for a failed
-  post and Send again for a post Buffer took, which asks for confirmation
+  post and Send again for a post Buffer took, which asks in the panel
   first and then sends the same text as a new post.
 
 Editors and administrators can open the panel and save choices.

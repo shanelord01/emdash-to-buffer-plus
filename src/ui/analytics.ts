@@ -18,6 +18,7 @@ import {
 	aggregatesReach,
 	aggregatesSince,
 	channelTotals,
+	daysIn,
 	type OriginSeries,
 	failedIn,
 	figuresByDay,
@@ -27,6 +28,8 @@ import {
 	originTotals,
 	periodOf,
 	queued,
+	reported,
+	reportedTotal,
 	sendsByDay,
 	sentIn,
 	topEntries,
@@ -34,9 +37,9 @@ import {
 } from "../report/figures.js";
 import type { PluginSettings } from "../settings.js";
 import { channelConfig, hintsFor, limitFor, storedReadings, type Stored } from "../store/kv.js";
-import { daysBetween, RANGES, type Aggregates, type Ledger, type Origins, type RangeDays } from "../store/report.js";
-import { actions, banner, button, columns, context, empty, header, link, stats, table, timeseries, type PageBlock, type StatItem } from "./blocks.js";
-import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatTime, trendOf } from "./format.js";
+import { daysBetween, RANGES, type Aggregates, type Day, type Ledger, type Origins, type RangeDays } from "../store/report.js";
+import { actions, banner, button, columns, context, dailyChart, empty, header, link, stats, table, type PageBlock, type StatItem } from "./blocks.js";
+import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatShortDay, formatTime, trendOf } from "./format.js";
 
 export const RANGE_ACTION = "buffer:range";
 export const PAGE_REFRESH_ACTION = "buffer:refresh";
@@ -47,6 +50,15 @@ export const DEFAULT_RANGE: RangeDays = 30;
 export const BUFFER_APP_URL = "https://publish.buffer.com";
 
 const TOP_ENTRIES = 10;
+
+/**
+ * Values one figure chart may hold, day labels included. A Block Kit
+ * response is capped at 2,000 JSON nodes (BLOCK_RESPONSE_LIMITS.maxNodes),
+ * every value is a node, and the page has two figure charts beside the
+ * sent chart and the tables: ten channels split two ways over 90 days
+ * would be 3,600 values. Past this, a chart keeps its busiest lines.
+ */
+export const CHART_VALUES = 500;
 
 export function parseRange(value: unknown): RangeDays {
 	const n = typeof value === "string" ? Number(value) : value;
@@ -67,8 +79,6 @@ export interface AnalyticsInput {
 	canManage: boolean;
 	now: Date;
 }
-
-const at = (day: string) => Date.parse(`${day}T00:00:00.000Z`);
 
 /** The channels the report covers: the ones switched on, in Buffer's order. */
 export function sharedChannels(stored: Stored): BufferChannel[] {
@@ -107,7 +117,9 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	const days = figuresByDay(aggregates, ids, figurePeriod.current);
 	const prevDays = aggregatesReach(aggregates, ids, figurePeriod.previous) ? figuresByDay(aggregates, ids, figurePeriod.previous) : null;
 	const methods = Object.fromEntries(Object.entries(stored.report.origins?.channels ?? {}).map(([id, row]) => [id, row.method]));
-	const series = originSeries(aggregates, input.origins, shared.map((c) => ({ id: c.id, service: c.service, name: c.displayName || c.name })), methods, figurePeriod.current);
+	// The last pass of the post list covered every day up to the one it ran on.
+	const coveredTo = stored.report.origins?.at.slice(0, 10);
+	const series = originSeries(aggregates, input.origins, shared.map((c) => ({ id: c.id, service: c.service, name: c.displayName || c.name })), methods, figurePeriod.current, coveredTo);
 
 	const sent = sentIn(ledger, current);
 	const sentPrev = ledgerPrev ? sentIn(ledger, previous) : null;
@@ -129,19 +141,24 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	];
 	out.push(stats(items, { blockId: "buffer:stats" }));
 
-	const sends = sendsByDay(ledger, current, watch);
+	// Every day of the range is on the axis. A day before the plugin watched has no bar and shows "-".
+	const sends = new Map(sendsByDay(ledger, current, watch).map((d) => [d.day, d]));
 	// A chart of nothing draws an empty 0 to 1 axis: say so instead.
-	if (!sends.some((d) => d.sent > 0 || d.failed > 0)) {
+	if (![...sends.values()].some((d) => d.sent > 0 || d.failed > 0)) {
 		out.push(empty({ title: t(lang, "chartNothingTitle"), description: t(lang, "chartNothingText"), blockId: "buffer:chart:sent" }));
 	} else {
+		const rangeDays = daysIn(current);
 		out.push(
-			timeseries(
-				[
-					{ name: t(lang, "seriesSent"), data: sends.map((d) => [at(d.day), d.sent] as [number, number]) },
-					{ name: t(lang, "seriesFailed"), data: sends.map((d) => [at(d.day), d.failed] as [number, number]) },
+			dailyChart({
+				labels: rangeDays.map((d) => formatShortDay(d, lang)),
+				series: [
+					{ name: t(lang, "seriesSent"), data: rangeDays.map((d) => sends.get(d)?.sent ?? null) },
+					{ name: t(lang, "seriesFailed"), data: rangeDays.map((d) => sends.get(d)?.failed ?? null) },
 				],
-				{ blockId: "buffer:chart:sent", height: 300, style: "bar" },
-			),
+				style: "bar",
+				height: 300,
+				blockId: "buffer:chart:sent",
+			}),
 		);
 	}
 	const since = aggregatesSince(aggregates, ids);
@@ -152,8 +169,11 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	];
 	out.push(context(notes.join(" · ")));
 
-	out.push(figureCharts(series, limited ? figureRange : null, lang));
+	const figureDays = daysIn(figurePeriod.current);
+	const drawn = figureCharts(series, figureDays, limited ? figureRange : null, lang);
+	out.push(drawn.block);
 	const chartNotes = [
+		...(drawn.capped ? [t(lang, "chartBusiest", { count: drawn.capped.shown, total: drawn.capped.total })] : []),
 		t(lang, "figuresNote"),
 		...(series.some((s) => s.origin === "direct" && s.derived) ? [t(lang, "derivedNote")] : []),
 		...(series.some((s) => s.origin === "unsplit") ? [t(lang, "unsplitNote")] : []),
@@ -257,18 +277,35 @@ function splitText(series: OriginSeries[], key: "engagement" | "impressions", la
 
 const SERIES_KEY = { direct: "seriesDirect", buffer: "seriesBuffer", unsplit: "seriesUnsplit" } as const;
 
-/** One line per channel and origin, "Facebook (Direct)", in the host's own palette. Lines without a figure are left out. */
-function figureCharts(series: OriginSeries[], limitedTo: number | null, lang: Lang): PageBlock {
+/**
+ * One line per channel and origin, "Facebook (Direct)", in the host's own
+ * palette, over every day Buffer's figures can cover. A day with no value
+ * is a gap, not a zero. A line with no figure Buffer reported for the
+ * chart's metric is left out, so a network that does not report
+ * impressions draws no line of zeros. Past `CHART_VALUES`, each chart keeps
+ * its busiest lines and the page says so.
+ */
+function figureCharts(series: OriginSeries[], days: Day[], limitedTo: number | null, lang: Lang): { block: PageBlock; capped: { shown: number; total: number } | null } {
+	const labels = days.map((d) => formatShortDay(d, lang));
+	const maxLines = Math.max(1, Math.floor((CHART_VALUES - days.length) / Math.max(1, days.length)));
+	let capped: { shown: number; total: number } | null = null;
 	const chart = (key: "engagement" | "impressions", blockId: string, yAxisName: string) => {
-		const lines = series
-			.map((s) => ({
-				name: t(lang, SERIES_KEY[s.origin], { network: s.name }),
-				data: s.days.filter((d) => d[key] !== undefined).map((d) => [at(d.day), d[key]!] as [number, number]),
-			}))
-			.filter((line) => line.data.length > 0);
-		return lines.length > 0 ? timeseries(lines, { blockId, height: 220, gradient: lines.length === 1, yAxisName }) : context(t(lang, "noFigures"));
+		let lines = series
+			.filter((s) => s.days.some((d) => reported(d, key)))
+			.map((s) => {
+				const byDay = new Map(s.days.map((d) => [d.day, d[key]]));
+				return { name: t(lang, SERIES_KEY[s.origin], { network: s.name }), data: days.map((d) => byDay.get(d) ?? null), size: reportedTotal(s.days, key) ?? 0 };
+			});
+		if (lines.length > maxLines) {
+			const keep = new Set([...lines].sort((a, b) => b.size - a.size).slice(0, maxLines));
+			capped = { shown: maxLines, total: Math.max(lines.length, capped?.total ?? 0) };
+			lines = lines.filter((line) => keep.has(line));
+		}
+		return lines.length > 0
+			? dailyChart({ labels, series: lines.map(({ name, data }) => ({ name, data })), style: "line", height: 220, gradient: true, yAxisName, blockId })
+			: context(t(lang, "noFigures"));
 	};
-	return columns([
+	const block = columns([
 		[
 			header(limitedTo ? t(lang, "engagementByDayLast", { days: limitedTo }) : t(lang, "engagementByDay")),
 			chart("engagement", "buffer:chart:engagement", t(lang, "axisInteractions")),
@@ -278,6 +315,7 @@ function figureCharts(series: OriginSeries[], limitedTo: number | null, lang: La
 			chart("impressions", "buffer:chart:impressions", t(lang, "axisTimesShown")),
 		],
 	]);
+	return { block, capped };
 }
 
 function channelName(stored: Stored, id: string): string | undefined {

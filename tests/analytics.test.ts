@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Aggregates, AggregateDay, Origins, ReportState } from "../src/store/report.js";
 import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION } from "../src/ui/analytics.js";
+import { formatShortDay } from "../src/ui/format.js";
 import { PAGE_PATH } from "../src/ui/page.js";
 import { SETUP_ACTION } from "../src/ui/analytics.js";
 import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
@@ -73,9 +74,9 @@ describe("the Analytics view", () => {
 		expect(byLabel["Engagement, last 30 days"]).toMatchObject({ value: "180" });
 
 		const charts = JSON.stringify(blocks.filter((b) => b.type === "chart" || b.type === "columns"));
-		expect(charts).toContain('"style":"bar"');
+		expect(charts).toContain('"type":"bar"');
 		expect(charts).toContain('"height":300');
-		expect(charts).toContain('"y_axis_name":"Times shown"');
+		expect(charts).toContain('"name":"Times shown"');
 
 		const body = text(response);
 		expect(body).toContain('"type":"link","label":"View post","target":{"kind":"external","url":"https://www.linkedin.com/feed/update/1"}');
@@ -304,19 +305,24 @@ describe("Buffer's history limit on the page", () => {
 
 describe("figures by origin", () => {
 	const FB2 = channel("c4", "facebook", { displayName: "Caravan club" });
-	type Series = Array<{ name: string; data: Array<[number, number]> }>;
-	const series = (response: unknown, blockId: string): Series => {
-		let found: Series = [];
+	type Series = Array<{ name: string; data: Array<number | null> }>;
+	type Chart = { labels: string[]; series: Series };
+	const chartOf = (response: unknown, blockId: string): Chart => {
+		let found: Chart = { labels: [], series: [] };
 		const walk = (node: unknown): void => {
 			if (Array.isArray(node)) return node.forEach(walk);
 			if (!node || typeof node !== "object") return;
 			const block = node as Record<string, unknown>;
-			if (block.type === "chart" && block.block_id === blockId) found = (block.config as { series: Series }).series;
+			if (block.type === "chart" && block.block_id === blockId) {
+				const options = (block.config as { options: { xAxis: { data: string[] }; series: Series } }).options;
+				found = { labels: options.xAxis.data, series: options.series.map((s) => ({ name: s.name, data: s.data })) };
+			}
 			Object.values(block).forEach(walk);
 		};
 		walk(response);
 		return found;
 	};
+	const series = (response: unknown, blockId: string): Series => chartOf(response, blockId).series;
 
 	async function seedOrigins(runtime: PluginRuntimeTestHost, origins: Origins, methods: Record<string, "listed" | "derived">) {
 		await seedChannels(runtime, [LI, { ...FB, isDisconnected: false }, FB2]);
@@ -366,7 +372,11 @@ describe("figures by origin", () => {
 			"Facebook FuelOracle page (Direct)",
 			"Facebook FuelOracle page (Buffer)",
 		]);
-		expect(engagement.find((s) => s.name === "Facebook FuelOracle page (Direct)")?.data.map((d) => d[1])).toEqual([5]);
+		// Every day of the range is on the axis; the days before the post list covered Facebook have no value.
+		const fbDirect = engagement.find((s) => s.name === "Facebook FuelOracle page (Direct)")!.data;
+		expect(fbDirect).toHaveLength(30);
+		expect(fbDirect.at(-1)).toBe(5);
+		expect(fbDirect.slice(0, -1).every((v) => v === null)).toBe(true);
 		// Caravan club has no figures read yet: no line at all, not a line of zeros.
 		expect(JSON.stringify(engagement)).not.toContain("Caravan club");
 		const impressions = series(response, "buffer:chart:impressions");
@@ -408,3 +418,180 @@ describe("figures by origin", () => {
 		expect(body).toContain("FuelOracle page derived from channel totals, as Buffer listed no post made directly (1 in Buffer, 1 through the API, this plugin included)");
 	});
 });
+
+describe("charts over the whole range", () => {
+	const chartOf = (response: unknown, blockId: string) => {
+		let found: { labels: string[]; series: Array<{ name: string; data: Array<number | null> }>; tooltip?: unknown; xType?: string } | undefined;
+		const walk = (node: unknown): void => {
+			if (Array.isArray(node)) return node.forEach(walk);
+			if (!node || typeof node !== "object") return;
+			const block = node as Record<string, unknown>;
+			if (block.type === "chart" && block.block_id === blockId) {
+				const config = block.config as { chart_type: string; options: Record<string, any> };
+				expect(config.chart_type).toBe("custom");
+				found = { labels: config.options.xAxis.data, series: config.options.series, tooltip: config.options.tooltip, xType: config.options.xAxis.type };
+			}
+			Object.values(block).forEach(walk);
+		};
+		walk(response);
+		return found!;
+	};
+	const line = (chart: ReturnType<typeof chartOf>, name: string) => chart.series.find((s) => s.name === name)?.data;
+	const FBX = channel("c2", "facebook", { displayName: "FuelOracle" });
+
+	/** LinkedIn split from Buffer's post list over the last `covered` days, by a pass that ran `passAgo` days ago. */
+	async function seedSplit(runtime: PluginRuntimeTestHost, origins: Origins, opts: { passAgo?: number; channels?: typeof LI[]; methods?: Record<string, "listed" | "derived">; aggregates?: Aggregates["days"] } = {}) {
+		const channels = opts.channels ?? [LI];
+		await seedChannels(runtime, channels);
+		await seedConfig(runtime, { channels: allOn(channels) });
+		await seedState(runtime, { watchSince: ago(3) });
+		await seedLedger(runtime, { e1: entry({ sentAt: ago(1), createdAt: ago(1) }) });
+		await seedAggregates(runtime, { days: opts.aggregates ?? {}, ranges: {}, progress: {} });
+		await runtime.fixtures.plugin.storage("reports", "origins", origins);
+		const methods = opts.methods ?? { c1: "listed" };
+		await seedReport(runtime, {
+			...nothingDue(),
+			origins: {
+				at: ago(opts.passAgo ?? 0),
+				since: dayAgo(6),
+				channels: Object.fromEntries(Object.entries(methods).map(([id, method]) => [id, { method, counts: { network: 1, buffer: 1, api: 0 } }])),
+			},
+		});
+	}
+
+	it("spans the selected range with date labels, and a day the post list covers with no posts is 0", async () => {
+		host = await newHost();
+		await seedSplit(host, {
+			days: { c1: { [dayAgo(3)]: { direct: { posts: 1, engagement: 5, impressions: 50 } }, [today]: { buffer: { posts: 2, engagement: 4, impressions: 40 } } } },
+			coveredFrom: { c1: dayAgo(6) },
+		});
+
+		const response = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 7 });
+
+		expectValid(response);
+		const engagement = chartOf(response, "buffer:chart:engagement");
+		expect(engagement.xType).toBe("category");
+		expect(engagement.labels).toEqual([6, 5, 4, 3, 2, 1, 0].map((n) => formatShortDay(dayAgo(n), "en")));
+		expect(engagement.labels[0]).toMatch(/^\d{1,2} [A-Z][a-z]+$/);
+		// One post on one day is 5 on that day and 0 on the days around it, not a line held at 5.
+		expect(line(engagement, "LinkedIn (Direct)")).toEqual([0, 0, 0, 5, 0, 0, 0]);
+		expect(line(engagement, "LinkedIn (Buffer)")).toEqual([0, 0, 0, 0, 0, 0, 4]);
+		expect(line(chartOf(response, "buffer:chart:impressions"), "LinkedIn (Direct)")).toEqual([0, 0, 0, 50, 0, 0, 0]);
+		// The tooltip is ECharts' own over a category axis: the day label, no time of day.
+		expect(engagement.tooltip).toEqual({ trigger: "axis" });
+		expect(JSON.stringify(response)).not.toContain("formatter");
+		expect(JSON.stringify(response)).not.toContain("timeseries");
+	});
+
+	it("days the plugin has not read, and days beyond Buffer's history limit, stay missing", async () => {
+		host = await newHost();
+		await seedSplit(
+			host,
+			{ days: { c1: { [dayAgo(2)]: { direct: { posts: 1, engagement: 3 } }, [dayAgo(1)]: { buffer: { posts: 1, engagement: 2 } } } }, coveredFrom: { c1: dayAgo(3) } },
+			// The last pass ran yesterday, so today is not covered yet.
+			{ passAgo: 1 },
+		);
+		await seedReport(host, {
+			...nothingDue(),
+			insightsHistory: { days: 5, learntAt: NOW.toISOString() },
+			origins: { at: ago(1), since: dayAgo(3), channels: { c1: { method: "listed", counts: { network: 1, buffer: 1, api: 0 } } } },
+		});
+
+		const response = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 7 });
+
+		expectValid(response);
+		const engagement = chartOf(response, "buffer:chart:engagement");
+		// The plan gives five days: the axis covers those five, not the seven of the range.
+		expect(engagement.labels).toEqual([4, 3, 2, 1, 0].map((n) => formatShortDay(dayAgo(n), "en")));
+		// Four days ago is before the post list covered the channel; today is after its last pass.
+		expect(line(engagement, "LinkedIn (Direct)")).toEqual([null, 0, 3, 0, null]);
+		expect(line(engagement, "LinkedIn (Buffer)")).toEqual([null, 0, 0, 2, null]);
+		// The sent chart covers the whole range: no bar before the plugin started watching three days ago.
+		const sent = chartOf(response, "buffer:chart:sent");
+		expect(sent.labels).toHaveLength(7);
+		expect(line(sent, "Sent")).toEqual([null, null, null, 0, 0, 1, 0]);
+	});
+
+	it("a day with posts whose network reported no figure for the metric stays missing, and so does a day with unread posts", async () => {
+		host = await newHost();
+		await seedSplit(host, {
+			days: {
+				c1: {
+					// Engagement reported, impressions not.
+					[dayAgo(4)]: { direct: { posts: 1, engagement: 6 } },
+					[dayAgo(3)]: { direct: { posts: 1, engagement: 2, impressions: 20 } },
+					// A post Buffer has not read: it could be either origin.
+					[dayAgo(1)]: { unread: 1 },
+				},
+			},
+			coveredFrom: { c1: dayAgo(6) },
+		});
+
+		const response = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 7 });
+
+		expectValid(response);
+		expect(line(chartOf(response, "buffer:chart:engagement"), "LinkedIn (Direct)")).toEqual([0, 0, 6, 2, 0, null, 0]);
+		expect(line(chartOf(response, "buffer:chart:impressions"), "LinkedIn (Direct)")).toEqual([0, 0, null, 20, 0, null, 0]);
+		// LinkedIn made no post through Buffer in the range: no line of zeros.
+		expect(line(chartOf(response, "buffer:chart:engagement"), "LinkedIn (Buffer)")).toBeUndefined();
+	});
+
+	it("a channel with no posts in the range draws no line, and a derived channel is 0 on a day Buffer counted no direct post", async () => {
+		host = await newHost();
+		await seedSplit(
+			host,
+			{
+				days: { c2: { [dayAgo(2)]: { buffer: { posts: 1, engagement: 4 } } } },
+				coveredFrom: { c1: dayAgo(6), c2: dayAgo(6) },
+			},
+			{
+				channels: [LI, FBX],
+				methods: { c1: "listed", c2: "derived" },
+				aggregates: {
+					c2: {
+						[dayAgo(3)]: { posts: 0, metrics: {}, metricsUpdatedAt: null },
+						[dayAgo(2)]: { posts: 2, metrics: { reactions: 9 }, metricsUpdatedAt: NOW.toISOString() },
+						[dayAgo(1)]: { posts: 1, metrics: { reactions: 4 }, metricsUpdatedAt: NOW.toISOString() },
+					},
+				},
+			},
+		);
+
+		const response = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 7 });
+
+		expectValid(response);
+		const engagement = chartOf(response, "buffer:chart:engagement");
+		expect(engagement.series.map((s) => s.name)).toEqual(["Facebook (Direct)", "Facebook (Buffer)"]);
+		// Days the aggregates have not read stay missing; a day Buffer counted one post, the listed one, is 0.
+		expect(line(engagement, "Facebook (Direct)")).toEqual([null, null, null, 0, 5, 4, null]);
+		expect(line(engagement, "Facebook (Buffer)")).toEqual([0, 0, 0, 0, 4, 0, 0]);
+	});
+
+	it("ten channels split two ways over 90 days stay inside Block Kit's node limit, keeping each chart's busiest lines", async () => {
+		host = await newHost();
+		const many = Array.from({ length: 10 }, (_, i) => channel(`m${i}`, "linkedin", { displayName: `Page ${i}` }));
+		const originDays = Object.fromEntries(
+			many.map((c, i) => [c.id, Object.fromEntries(Array.from({ length: 90 }, (_, d) => [dayAgo(d), { direct: { posts: 1, engagement: i + 1, impressions: 10 * (i + 1) }, buffer: { posts: 1, engagement: 1, impressions: 5 } }]))]),
+		);
+		await seedChannels(host, many);
+		await seedConfig(host, { channels: allOn(many) });
+		await seedState(host, { watchSince: ago(100) });
+		await seedLedger(host, Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`e${i}`, entry({ channelId: `m${i % 10}`, sentAt: ago(i), createdAt: ago(i), engagement: i })])));
+		await seedAggregates(host, { days: {}, ranges: {}, progress: {} });
+		await host.fixtures.plugin.storage("reports", "origins", { days: originDays, coveredFrom: Object.fromEntries(many.map((c) => [c.id, dayAgo(89)])) });
+		await seedReport(host, {
+			...nothingDue(),
+			origins: { at: NOW.toISOString(), since: dayAgo(89), channels: Object.fromEntries(many.map((c) => [c.id, { method: "listed" as const, counts: { network: 90, buffer: 90, api: 0 } }])) },
+		});
+
+		const response = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 90 });
+
+		expectValid(response);
+		const engagement = chartOf(response, "buffer:chart:engagement");
+		expect(engagement.labels).toHaveLength(90);
+		// The busiest lines are kept, in their usual order.
+		expect(engagement.series.map((s) => s.name)).toEqual(["LinkedIn Page 6 (Direct)", "LinkedIn Page 7 (Direct)", "LinkedIn Page 8 (Direct)", "LinkedIn Page 9 (Direct)"]);
+		expect(JSON.stringify(response)).toMatch(/Each chart shows its \d+ busiest lines of 20\./);
+	});
+});
+

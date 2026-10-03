@@ -21,7 +21,7 @@
 
 import { engagementOf, engagementRateOf, impressionsOf } from "../buffer/metrics.js";
 import { OPEN_POST_STATUSES } from "../store/deliveries.js";
-import { addDays, daysBetween, utcDay, type Aggregates, type Day, type Ledger, type LedgerEntry, type OriginMethod, type Origins } from "../store/report.js";
+import { addDays, daysBetween, utcDay, type Aggregates, type Day, type Ledger, type LedgerEntry, type OriginDay, type OriginMethod, type Origins } from "../store/report.js";
 
 export interface Period {
 	start: Day;
@@ -32,6 +32,13 @@ export function periodOf(days: number, now: Date): { current: Period; previous: 
 	const end = utcDay(now);
 	const start = addDays(end, -(days - 1));
 	return { current: { start, end }, previous: { start: addDays(start, -days), end: addDays(start, -1) } };
+}
+
+/** Every day of a period, oldest first. */
+export function daysIn(p: Period): Day[] {
+	const out: Day[] = [];
+	for (let day = p.start; daysBetween(day, p.end) >= 0; day = addDays(day, 1)) out.push(day);
+	return out;
 }
 
 export function within(day: Day, p: Period): boolean {
@@ -111,6 +118,8 @@ export interface DayFigures {
 	day: Day;
 	engagement?: number;
 	impressions?: number;
+	/** In a series by origin: the posts the figures cover, 0 on a covered day with none. */
+	posts?: number;
 }
 
 /**
@@ -253,7 +262,24 @@ export interface OriginSeries {
 	origin: Origin;
 	/** Direct figures worked out as the channel's total minus the posts Buffer listed. */
 	derived: boolean;
+	/** Posts the series counts over the period, from Buffer's post list (0 for "unsplit", which counts none). */
+	posts: number;
+	/**
+	 * The days with a value, oldest first. A day the post list covers with
+	 * no post of this origin is a real zero, marked `posts: 0`. A day
+	 * nobody has read, and a figure the network did not report, are absent.
+	 */
 	days: DayFigures[];
+}
+
+/** A day the post list covers with no post of an origin: no posts, so nothing to count. */
+function noPosts(day: Day): DayFigures {
+	return { day, posts: 0, engagement: 0, impressions: 0 };
+}
+
+/** Whether a day's figure was reported by Buffer, as opposed to the zero of a day with no posts. */
+export function reported(d: DayFigures, key: "engagement" | "impressions"): boolean {
+	return d[key] !== undefined && d.posts !== 0;
 }
 
 /**
@@ -267,7 +293,14 @@ export interface OriginSeries {
  * - `derived`: Buffer listed no post made on the network, so the direct
  *   figure is the channel's aggregate for the day minus the listed posts,
  *   when larger, and only on a day whose listed posts all have figures.
- * Missing stays missing: a series holds only days with a figure.
+ *
+ * The post list covers a channel from `origins.coveredFrom` to the day of
+ * the last pass (`coveredTo`). On those days an origin with no posts is 0:
+ * there was nothing to count. A day with posts whose figures Buffer has
+ * not read (`unread`) could be either origin, so it adds no zero. Missing
+ * stays missing everywhere else: a day not read, and a metric the network
+ * did not report on a day with posts. A direct or Buffer series with no
+ * post in the period is left out, and so is an unsplit one with no figure.
  */
 export function originSeries(
 	agg: Aggregates,
@@ -275,6 +308,7 @@ export function originSeries(
 	channels: Array<{ id: string; service: string; name: string }>,
 	methods: Record<string, OriginMethod | undefined>,
 	p: Period,
+	coveredTo?: Day,
 ): OriginSeries[] {
 	const perNetwork = new Map<string, number>();
 	for (const c of channels) perNetwork.set(c.service, (perNetwork.get(c.service) ?? 0) + 1);
@@ -284,33 +318,44 @@ export function originSeries(
 		const method = methods[c.id];
 		const covered = origins.coveredFrom[c.id];
 		const series = {
-			direct: { channelId: c.id, name, origin: "direct" as const, derived: method === "derived", days: [] as DayFigures[] },
-			buffer: { channelId: c.id, name, origin: "buffer" as const, derived: false, days: [] as DayFigures[] },
-			unsplit: { channelId: c.id, name, origin: "unsplit" as const, derived: false, days: [] as DayFigures[] },
+			direct: { channelId: c.id, name, origin: "direct" as const, derived: method === "derived", posts: 0, days: [] as DayFigures[] },
+			buffer: { channelId: c.id, name, origin: "buffer" as const, derived: false, posts: 0, days: [] as DayFigures[] },
+			unsplit: { channelId: c.id, name, origin: "unsplit" as const, derived: false, posts: 0, days: [] as DayFigures[] },
 		};
 		const dayRows = agg.days[c.id] ?? {};
 		const originRows = origins.days[c.id] ?? {};
-		const all = new Set([...Object.keys(dayRows), ...Object.keys(originRows)]);
-		for (const day of [...all].sort()) {
-			if (!within(day, p)) continue;
+		for (let day = p.start; daysBetween(day, p.end) >= 0; day = addDays(day, 1)) {
 			const row = dayRows[day];
 			const total: DayFigures | null = row?.metricsUpdatedAt ? figuresOf(day, engagementOf(row.metrics), impressionsOf(row.metrics)) : null;
-			const split = method && covered && daysBetween(covered, day) >= 0;
+			const split = method && covered && daysBetween(covered, day) >= 0 && (!coveredTo || daysBetween(day, coveredTo) >= 0);
 			if (!split) {
 				if (total && (total.engagement !== undefined || total.impressions !== undefined)) series.unsplit.days.push(total);
 				continue;
 			}
 			const o = originRows[day] ?? {};
-			if (o.buffer) push(series.buffer.days, figuresOf(day, o.buffer.engagement, o.buffer.impressions));
+			const unread = (o.unread ?? 0) > 0;
+			const listed = (target: OriginSeries, sum: OriginDay["buffer"]) => {
+				if (sum) {
+					target.posts += sum.posts;
+					push(target.days, { ...figuresOf(day, sum.engagement, sum.impressions), posts: sum.posts });
+				} else if (!unread) target.days.push(noPosts(day));
+			};
+			listed(series.buffer, o.buffer);
 			if (method === "listed") {
-				if (o.direct) push(series.direct.days, figuresOf(day, o.direct.engagement, o.direct.impressions));
-			} else if (total && !o.unread) {
-				push(series.direct.days, figuresOf(day, minus(total.engagement, o.buffer?.engagement), minus(total.impressions, o.buffer?.impressions)));
+				listed(series.direct, o.direct);
+			} else if (row && !unread) {
+				// Buffer's count of the day's posts less the ones it listed: the posts made directly.
+				const directPosts = row.posts - (o.buffer?.posts ?? 0);
+				if (directPosts <= 0) series.direct.days.push(noPosts(day));
+				else if (total) {
+					series.direct.posts += directPosts;
+					push(series.direct.days, { ...figuresOf(day, minus(total.engagement, o.buffer?.engagement), minus(total.impressions, o.buffer?.impressions)), posts: directPosts });
+				}
 			}
 		}
 		out.push(series.direct, series.buffer, series.unsplit);
 	}
-	return out.filter((s) => s.days.length > 0);
+	return out.filter((s) => (s.origin === "unsplit" ? s.days.length > 0 : s.posts > 0));
 }
 
 function figuresOf(day: Day, engagement: number | undefined, impressions: number | undefined): DayFigures {
@@ -328,6 +373,11 @@ function minus(total: number | undefined, listed: number | undefined): number | 
 	return rest > 0 ? rest : undefined;
 }
 
+/** The sum of the figures Buffer reported in a series, or undefined when it reported none. Days with no posts add nothing. */
+export function reportedTotal(days: DayFigures[], key: "engagement" | "impressions"): number | undefined {
+	return total(days.filter((d) => reported(d, key)), key);
+}
+
 /**
  * Direct and via-Buffer totals of one figure over the series, or null when
  * any of it is unsplit (the parts would not add up to the total).
@@ -336,7 +386,7 @@ export function originTotals(series: OriginSeries[], key: "engagement" | "impres
 	let direct: number | undefined;
 	let buffer: number | undefined;
 	for (const s of series) {
-		const sum = total(s.days, key);
+		const sum = reportedTotal(s.days, key);
 		if (sum === undefined) continue;
 		if (s.origin === "unsplit") return null;
 		if (s.origin === "direct") direct = (direct ?? 0) + sum;
