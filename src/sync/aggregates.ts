@@ -24,9 +24,26 @@
  * - Figures are refreshed about daily (AggregatedPostMetrics
  *   .metricsUpdatedAt), so the last 30 days are read again once a day and
  *   older days keep what was read last.
+ * - Buffer's plan may give figures for a limited number of days only (the
+ *   Free plan: 31). Buffer does not document it; it refuses an older window
+ *   with a message naming the limit, and the reference types the field
+ *   non-null, so one refused alias fails the whole request. The limit is
+ *   learnt from that message (`learnHistory`), every window then starts
+ *   inside it: the backfill stops at today minus (limit - 1) and a range
+ *   longer than the limit covers the limit, with the days it covered kept
+ *   beside it. A request refused for the limit alone is asked again at once,
+ *   cut to the limit, while the invocation has the calls for it, else on
+ *   the next run. Once a week one day just beyond the limit is asked for on
+ *   its own; when Buffer answers it, the plan now goes further and the
+ *   limit is dropped.
+ *
+ * Bridge calls with a retry or the weekly check: one more Buffer request,
+ * taken only while the invocation has a call for it and one for the row
+ * write beyond the run's reserve.
  */
 
-import type { AggregateWindow } from "../buffer/client.js";
+import { failureKind, type AggregateWindow } from "../buffer/client.js";
+import { effectiveDays, historyRefusal } from "../buffer/history.js";
 import { POST_COUNT } from "../buffer/metrics.js";
 import {
 	addDays,
@@ -40,7 +57,18 @@ import {
 	type Aggregates,
 	type Day,
 } from "../store/report.js";
-import { backfillHeadroom, headroom, noteFailure, observe, type PhaseContext } from "./common.js";
+import {
+	backfillHeadroom,
+	headroom,
+	historyDays,
+	learnHistory,
+	noteFailure,
+	noteOtherFailure,
+	observe,
+	refusalOf,
+	RUN_RESERVE,
+	type PhaseContext,
+} from "./common.js";
 
 /** Aliases per request (api-limits.md: at most 30). */
 export const ALIASES_PER_REQUEST = 30;
@@ -56,9 +84,29 @@ export const RETRY_AFTER_FAILURE_MS = 60 * 60_000;
 
 export const AGGREGATES_COST = 3;
 
+/** How often a day just beyond the history limit is asked for, to notice a plan that now goes further. */
+export const HISTORY_CHECK_MS = 7 * 24 * 60 * 60_000;
+
 interface Planned {
 	window: AggregateWindow;
-	kind: "recent" | "backfill" | "range";
+	kind: "recent" | "backfill" | "range" | "check";
+	/** A range's real length in days: shorter than the range under a history limit. */
+	days?: number;
+}
+
+/** The oldest day the plan's history limit lets a window start on, if it has one. */
+export function historyFloor(today: Day, limit: number | undefined): Day | undefined {
+	return limit === undefined ? undefined : addDays(today, -(limit - 1));
+}
+
+/** The later of two days, either of which may be absent. */
+function later(a: Day, b: Day | undefined): Day {
+	return b !== undefined && daysBetween(a, b) > 0 ? b : a;
+}
+
+/** The first day the daily re-read of recent days goes back to. */
+function recentFloorOf(today: Day, limit: number | undefined): Day {
+	return later(addDays(today, -(RECENT_DAYS - 1)), historyFloor(today, limit));
 }
 
 /** The channels whose figures are read: the ones this plugin shares to. */
@@ -85,9 +133,10 @@ function dayWindow(organizationId: string, channelId: string, day: Day): Aggrega
  * `withBackfill`, days older than the last 30 are left for a later run: the
  * backfill runs only while Buffer's 24-hour window is at least half full.
  */
-export function plan(agg: Aggregates, targets: Array<{ id: string; organizationId: string }>, today: Day, withBackfill = true): Planned[] {
-	const floor = addDays(today, -(REPORT_DAYS - 1));
-	const recentFloor = addDays(today, -(RECENT_DAYS - 1));
+export function plan(agg: Aggregates, targets: Array<{ id: string; organizationId: string }>, today: Day, withBackfill = true, limit?: number): Planned[] {
+	const floor = later(addDays(today, -(REPORT_DAYS - 1)), historyFloor(today, limit));
+	const recentFloor = recentFloorOf(today, limit);
+	settleRecent(agg, today, recentFloor);
 	const recent: Planned[] = [];
 	const backfill: Planned[] = [];
 	const ranges: Planned[] = [];
@@ -104,15 +153,38 @@ export function plan(agg: Aggregates, targets: Array<{ id: string; organizationI
 			}
 		}
 		if (agg.rangesOn !== today) {
-			for (const days of RANGES) {
+			for (const range of RANGES) {
+				const days = effectiveDays(range, limit);
 				ranges.push({
 					kind: "range",
-					window: { organizationId: t.organizationId, channelId: t.id, start: `${addDays(today, -(days - 1))}T00:00:00Z`, end: `${today}T23:59:59Z`, key: String(days) },
+					days,
+					window: { organizationId: t.organizationId, channelId: t.id, start: `${addDays(today, -(days - 1))}T00:00:00Z`, end: `${today}T23:59:59Z`, key: String(range) },
 				});
 			}
 		}
 	}
 	return [...recent, ...ranges, ...backfill];
+}
+
+/**
+ * A pass over the recent days that stopped on a day the history limit now
+ * puts out of reach is complete: nothing older can be read.
+ */
+function settleRecent(agg: Aggregates, today: Day, recentFloor: Day): void {
+	for (const prog of Object.values(agg.progress)) {
+		if (prog.recentOn === today || !prog.recentNext || daysBetween(recentFloor, prog.recentNext) >= 0) continue;
+		prog.recentOn = today;
+		delete prog.recentNext;
+		if (!prog.backTo || daysBetween(prog.backTo, recentFloor) < 0) prog.backTo = recentFloor;
+	}
+}
+
+/** Whether this run should ask for a day just beyond the history limit. */
+export function historyCheckDue(p: PhaseContext): boolean {
+	const known = p.report.insightsHistory;
+	if (!known || known.days >= REPORT_DAYS) return false;
+	const last = known.checkedAt ?? known.learntAt;
+	return p.now.getTime() - Date.parse(last) >= HISTORY_CHECK_MS;
 }
 
 export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promise<void> {
@@ -140,41 +212,92 @@ export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promi
 
 	let failed = false;
 	const ranges = new Set<string>();
-	for (let round = 0; round < rounds; round++) {
-		const batch = plan(agg, targets, today, backfillHeadroom(p)).slice(0, ALIASES_PER_REQUEST);
+	// A retry after a history refusal is one round more, while the calls allow it.
+	const spare = () => p.meter.left() >= RUN_RESERVE + 2;
+	let limitRounds = rounds;
+	for (let round = 0; round < limitRounds; round++) {
+		const limit = historyDays(p);
+		const check = round === 0 && historyCheckDue(p) && backfillHeadroom(p);
+		const batch = check ? [checkItem(targets[0]!, today, limit!)] : plan(agg, targets, today, backfillHeadroom(p), limit).slice(0, ALIASES_PER_REQUEST);
 		if (batch.length === 0) break;
 		// Shared bucket: checked before every request, with the reading the last one brought back.
 		if (!headroom(p)) break;
 		const result = await client.aggregates(batch.map((b) => b.window));
 		observe(p, result.rateLimit);
+		if (check) {
+			// Asked alone, so a refusal here spoils nothing else.
+			const refusal = result.ok ? null : refusalOf(result);
+			if (result.ok && result.data.refused.length === 0) {
+				delete p.report.insightsHistory;
+				delete agg.rangesOn;
+				delete p.report.problem;
+			} else if (refusal?.only) {
+				p.report.insightsHistory = { ...p.report.insightsHistory!, checkedAt: stamp };
+			} else if (!result.ok) {
+				noteFailure(p, result);
+				failed = true;
+				break;
+			}
+			if (round + 1 >= limitRounds && spare()) limitRounds++;
+			continue;
+		}
 		if (!result.ok) {
-			noteFailure(p, result);
+			const refusal = refusalOf(result);
+			if (refusal) learnHistory(p, refusal.days);
+			if (refusal?.only) {
+				if (round + 1 >= limitRounds && spare()) limitRounds++;
+				continue;
+			}
+			noteOtherFailure(p, result, refusal);
 			failed = true;
 			break;
 		}
-		delete p.report.problem;
-		for (const key of apply(agg, batch, result.data, today)) ranges.add(key);
+		for (const key of apply(agg, batch, result.data.results, today, historyDays(p))) ranges.add(key);
 		if (targets.every((t) => RANGES.every((d) => ranges.has(`${t.id}:${d}`)))) agg.rangesOn = today;
+		const refusal = historyRefusal(result.data.refused);
+		if (result.data.refused.length === 0) {
+			delete p.report.problem;
+			continue;
+		}
+		// Some aliases answered and some were refused: the answers are kept.
+		if (refusal) learnHistory(p, refusal.days);
+		if (refusal?.only) {
+			delete p.report.problem;
+			if (round + 1 >= limitRounds && spare()) limitRounds++;
+			continue;
+		}
+		const other = refusal?.other ?? result.data.refused[0]!;
+		noteFailure(p, { ok: false, kind: failureKind(other.code), message: other.message, ...(other.code && { code: other.code }) });
+		failed = true;
+		break;
 	}
 
 	prune(agg, new Set((p.stored.channels?.channels ?? []).map((c) => c.id)), today);
 	if (JSON.stringify(agg) !== before) await p.ctx.storage[REPORTS]!.put(AGGREGATES_ID, agg);
 
-	const remaining = plan(agg, targets, today, backfillHeadroom(p)).length;
+	const remaining = plan(agg, targets, today, backfillHeadroom(p), historyDays(p)).length;
 	p.report.aggregates = failed
 		? { ...p.report.aggregates, failedAt: stamp }
 		: { at: stamp, ...(remaining === 0 ? { done: today } : { pending: true }) };
 }
 
-/** File each answer and move each channel's progress past the days answered, in order. */
-/** Returns the range windows answered, as `channelId:days`. */
+/** The weekly check: one channel's day just beyond the history limit, asked for alone. */
+function checkItem(target: { id: string; organizationId: string }, today: Day, limit: number): Planned {
+	return { kind: "check", window: dayWindow(target.organizationId, target.id, addDays(today, -limit)) };
+}
+
+/**
+ * File each answer and move each channel's progress past the days answered,
+ * in order. Returns the range windows answered, as `channelId:days`.
+ */
 export function apply(
 	agg: Aggregates,
 	batch: Planned[],
 	results: Array<{ window: AggregateWindow; metrics: Record<string, number>; metricsUpdatedAt: string | null }>,
 	today: Day,
+	limit?: number,
 ): Set<string> {
-	const recentFloor = addDays(today, -(RECENT_DAYS - 1));
+	const recentFloor = recentFloorOf(today, limit);
 	const answered = new Map(results.map((r) => [r.window, r]));
 	const stopped = new Set<string>();
 	const fresh = new Set<string>();
@@ -184,9 +307,11 @@ export function apply(
 		if (item.kind === "range") {
 			if (!answer) continue;
 			fresh.add(`${c}:${item.window.key}`);
-			agg.ranges[c] = { ...agg.ranges[c], [item.window.key]: { metrics: answer.metrics, metricsUpdatedAt: answer.metricsUpdatedAt } };
+			const days = item.days !== undefined && String(item.days) !== item.window.key ? { days: item.days } : {};
+			agg.ranges[c] = { ...agg.ranges[c], [item.window.key]: { metrics: answer.metrics, metricsUpdatedAt: answer.metricsUpdatedAt, ...days } };
 			continue;
 		}
+		if (item.kind === "check") continue;
 		if (stopped.has(`${item.kind}:${c}`)) continue;
 		if (!answer) {
 			// Progress never jumps a day Buffer did not answer.

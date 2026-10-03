@@ -14,6 +14,11 @@
  *   scan        every 25 minutes, and while behind    3
  *   metrics     daily, and while a pass is under way  3
  *   aggregates  daily, and while backfilling          3 (4 in a chained run)
+ *   origins     when a metrics pass has finished      2
+ *
+ * A metrics or aggregates read that Buffer refuses for the plan's history
+ * limit is asked again at once, cut to the limit, only while the run still
+ * has the calls for it beyond its reserve.
  *
  * Every Buffer read first asks the shared-bucket guard
  * (`src/buffer/headroom.ts`): Buffer counts all of the account's API keys
@@ -45,9 +50,10 @@ import { OVERRIDES } from "../store/overrides.js";
 import { REPORT_KEY, type ReportState } from "../store/report.js";
 import { aggregatesDue, AGGREGATES_COST, runAggregatesPhase } from "./aggregates.js";
 import { refreshChannels } from "./channels.js";
-import { bufferClient, headroom, isDue, observe, paused, settleHeadroom, type PhaseContext } from "./common.js";
+import { bufferClient, headroom, isDue, observe, paused, RUN_RESERVE, settleHeadroom, type PhaseContext } from "./common.js";
+import { historyLimitDays } from "../buffer/history.js";
 import { runScanPhase, SCAN_COST, SCAN_EVERY_MS } from "./ledger.js";
-import { metricsDue, METRICS_COST, runMetricsPhase } from "./metrics.js";
+import { metricsDue, METRICS_COST, ORIGINS_COST, originsDue, runMetricsPhase, runOriginsPhase } from "./metrics.js";
 import { runStatusPhase, STATUS_COST, STATUS_EVERY_MS } from "./status.js";
 
 export const SYNC_TASK = "sync";
@@ -67,7 +73,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const PRUNE_BATCH = 100;
 
 /** Calls every run keeps back: the next catch-up run and the report state. */
-const RESERVE = 2;
+const RESERVE = RUN_RESERVE;
 
 /** What the delivery pass needs at the least: its query, a continuation, the state. */
 const DELIVERY_PASS_MIN = 3;
@@ -93,6 +99,9 @@ export async function runSync(rawCtx: PluginContext, task: SyncTask = SYNC_TASK,
 	const stored = await readStored(ctx);
 	const report: ReportState = { ...stored.report, lastSyncAt: now.toISOString() };
 	if (task === REFRESH_TASK) report.forcedAt = now.toISOString();
+	// 0.1.1 showed Buffer's history limit as a failed check. It is not one,
+	// and the reads now keep to it (src/buffer/history.ts).
+	if (historyLimitDays(report.problem?.message) !== null) delete report.problem;
 	const chained = task !== SYNC_TASK;
 
 	const p: PhaseContext = { ctx, meter, settings, stored, client: bufferClient(ctx, settings), now, report };
@@ -154,6 +163,8 @@ export async function runSync(rawCtx: PluginContext, task: SyncTask = SYNC_TASK,
 			due: () => buffer() && aggregatesDue(p),
 			run: () => runAggregatesPhase(p, chained ? 2 : 1),
 		},
+		// Files a finished pass of posts by origin; no Buffer request.
+		{ name: "origins", cost: ORIGINS_COST, due: () => originsDue(p), run: () => runOriginsPhase(p) },
 	];
 
 	for (const phase of phases) {

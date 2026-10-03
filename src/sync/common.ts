@@ -6,7 +6,8 @@
 
 import type { PluginContext } from "emdash/plugin";
 
-import { BufferClient, type BufferResult } from "../buffer/client.js";
+import { BufferClient, failureKind, type BufferResult } from "../buffer/client.js";
+import { historyRefusal, type HistoryRefusal } from "../buffer/history.js";
 import { backfillDecision, backgroundDecision, type Decision, type WindowReading } from "../buffer/headroom.js";
 import type { RateLimitSnapshot } from "../buffer/ratelimit.js";
 import type { Meter } from "../publish/budget.js";
@@ -44,6 +45,46 @@ export function noteFailure(p: PhaseContext, result: Extract<BufferResult<unknow
 		p.report.pausedUntil = new Date(p.now.getTime() + (result.retryAfterSeconds ?? 60) * 1000).toISOString();
 	}
 	p.report.problem = { at, kind: result.kind, message: result.message };
+}
+
+/** Calls every report run keeps back for its end: the next catch-up run and the report state. */
+export const RUN_RESERVE = 2;
+
+/** The plan's history limit in days, when Buffer has named one. */
+export function historyDays(p: PhaseContext): number | undefined {
+	return p.report.insightsHistory?.days;
+}
+
+/** What a failed or part-refused Buffer read says about the plan's history limit. */
+export function refusalOf(result: Extract<BufferResult<unknown>, { ok: false }>): HistoryRefusal | null {
+	return historyRefusal(result.errors?.length ? result.errors : [{ message: result.message, ...(result.code && { code: result.code }) }]);
+}
+
+/**
+ * Keep the history limit Buffer named. It is not a failure: nothing goes
+ * on `report.problem`, and the reads ask only for what the plan allows
+ * from here on.
+ *
+ * A refusal of a request already cut to the known limit means Buffer
+ * counts the days a little differently from this plugin (its day may start
+ * in the organisation's time zone, not UTC), so the limit is taken one day
+ * shorter rather than asked for again and refused again.
+ */
+export function learnHistory(p: PhaseContext, days: number): void {
+	const known = p.report.insightsHistory;
+	const stamp = p.now.toISOString();
+	const next = known && days >= known.days ? Math.max(1, known.days - 1) : days;
+	p.report.insightsHistory = { days: next, learntAt: stamp, checkedAt: stamp };
+}
+
+/**
+ * Record a failed read that was not refused for the history limit alone:
+ * Buffer's first other message goes on the page.
+ */
+export function noteOtherFailure(p: PhaseContext, result: Extract<BufferResult<unknown>, { ok: false }>, refusal: HistoryRefusal | null): void {
+	if (!refusal?.other) return noteFailure(p, result);
+	const code = refusal.other.code;
+	noteFailure(p, { ...result, kind: code ? failureKind(code) : result.kind, message: refusal.other.message, ...(code && { code }) });
 }
 
 /** Whether a phase last done at `at` is due again after `everyMs`, or after a Refresh. */

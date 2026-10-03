@@ -125,8 +125,8 @@ never in the runtime bundle). A plain `pnpm install` is enough.
   Block Kit route serves both, so the handler checks `routeCtx.user.role`
   (ADMIN is 50) before Discover, Retry or a save.
 - **Pages never call Buffer.** The Analytics view and the widget read the
-  `ledger` and `aggregates` rows of the `reports` collection in one
-  `getMany`; Refresh schedules the `refresh` run. A page that read
+  `ledger`, `aggregates` and `origins` rows of the `reports` collection
+  in one `getMany`; Refresh schedules the `refresh` run. A page that read
   deliveries or per-day rows directly would run out of bridge calls.
 - **A missing metric is not zero.** Buffer lists only the metric types a
   network reported, and a post or day with `metricsUpdatedAt` null has not
@@ -141,6 +141,20 @@ never in the runtime bundle). A plain `pnpm install` is enough.
   until no phase is due. A failed Buffer read sets `report.problem`, and
   Buffer phases then rest for 15 minutes, so a chain never hammers a
   failing API; a 429 pauses them for Retry-After.
+- **Buffer's history limit is learnt, never hard-coded.** Buffer refuses
+  insights older than the plan allows ("Free-plan Insights are limited to
+  the last 31 days of history.") and documents no such limit. The days go
+  in `report.insightsHistory` (`src/buffer/history.ts`); every aggregates
+  and posts window starts inside them, a refusal for the limit alone is
+  retried at once cut to it (never `report.problem`), and a day beyond it
+  is asked for alone once a week to notice an upgrade. A non-null field
+  refused in an aliased request nulls the whole answer, so never send a
+  window you know is too old.
+- **Figures by origin come from the metrics read.** The `posts` page that
+  updates deliveries also carries `via` and `channelId`; its sums go to
+  the `origins` row through the origins phase, so splitting Direct from
+  Buffer costs no Buffer request. Buffer does not document whether
+  `network` posts are listed: a channel with none listed is `derived`.
 - **Every settingsSchema key is in the manifest.** A setting that exists
   only in code is unusable on a registry install. The generated form
   takes only text, number, on/off, fixed select, secret, URL and email;
@@ -226,6 +240,14 @@ pnpm registry:publish   # builds, bundles and publishes to the EmDash registry
    `pnpm exec emdash-plugin info shane.bsky.shas.am emdash-to-buffer-plus --version <v>`
    (add `--watch` to wait). Checks can take from minutes to hours, and the
    listing can 404 for about 15 minutes after publishing.
+
+Releases cannot be withdrawn by the publisher. The CLI has no yank or
+unpublish command, and `--allow-overwrite` can be treated by the registry as
+a takedown. A release is withdrawn only by the registry labeller's signed
+`security-yanked` label (@emdash-cms/registry-moderation), meant for
+security problems. Fix forward: publish a patch version, which becomes the
+latest for installs and Check for updates. For a security flaw, publish the
+fix and ask EmDash to label the bad release.
 
 `package.json` is `private`, so nothing can be published to npm by
 accident.

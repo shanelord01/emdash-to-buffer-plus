@@ -11,16 +11,20 @@
 
 import type { BufferChannel } from "../buffer/client.js";
 import { backgroundDecision } from "../buffer/headroom.js";
+import { effectiveDays, historyLimitDays } from "../buffer/history.js";
 import { channelBlocker } from "../buffer/services.js";
 import { reasonText, t, type Lang } from "../i18n.js";
 import {
 	aggregatesReach,
 	aggregatesSince,
 	channelTotals,
+	type OriginSeries,
 	failedIn,
 	figuresByDay,
 	ledgerReaches,
 	nextQueued,
+	originSeries,
+	originTotals,
 	periodOf,
 	queued,
 	sendsByDay,
@@ -30,7 +34,7 @@ import {
 } from "../report/figures.js";
 import type { PluginSettings } from "../settings.js";
 import { channelConfig, hintsFor, limitFor, storedReadings, type Stored } from "../store/kv.js";
-import { daysBetween, RANGES, type Aggregates, type Ledger, type RangeDays } from "../store/report.js";
+import { daysBetween, RANGES, type Aggregates, type Ledger, type Origins, type RangeDays } from "../store/report.js";
 import { actions, banner, button, columns, context, empty, header, link, stats, table, timeseries, type PageBlock, type StatItem } from "./blocks.js";
 import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatTime, trendOf } from "./format.js";
 
@@ -55,6 +59,8 @@ export interface AnalyticsInput {
 	stored: Stored;
 	ledger: Ledger;
 	aggregates: Aggregates;
+	/** Figures per channel and day by origin (direct or through Buffer). */
+	origins: Origins;
 	/** Deliveries Buffer refused, counted from storage. */
 	failed: number;
 	range: RangeDays;
@@ -85,14 +91,23 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	}
 
 	const out: PageBlock[] = [controls(range, lang)];
+	// Buffer's history limit is a fact about the plan, not a fault: a line of context, not a banner.
+	const limit = stored.report.insightsHistory?.days;
+	if (limit !== undefined) out.push(context(t(lang, "historyLimit", { days: limit }), { blockId: "buffer:history" }));
 	out.push(...banners(input, shared));
 
 	const { current, previous } = periodOf(range, now);
 	const watch = stored.state.watchSince;
 	const ledgerPrev = ledgerReaches(watch, previous);
 	const ids = shared.map((c) => c.id);
-	const days = figuresByDay(aggregates, ids, current);
-	const prevDays = aggregatesReach(aggregates, ids, previous) ? figuresByDay(aggregates, ids, previous) : null;
+	// Buffer's figures cover what the plan allows: the last `figureRange` days.
+	const figureRange = effectiveDays(range, limit);
+	const limited = figureRange < range;
+	const figurePeriod = periodOf(figureRange, now);
+	const days = figuresByDay(aggregates, ids, figurePeriod.current);
+	const prevDays = aggregatesReach(aggregates, ids, figurePeriod.previous) ? figuresByDay(aggregates, ids, figurePeriod.previous) : null;
+	const methods = Object.fromEntries(Object.entries(stored.report.origins?.channels ?? {}).map(([id, row]) => [id, row.method]));
+	const series = originSeries(aggregates, input.origins, shared.map((c) => ({ id: c.id, service: c.service, name: c.displayName || c.name })), methods, figurePeriod.current);
 
 	const sent = sentIn(ledger, current);
 	const sentPrev = ledgerPrev ? sentIn(ledger, previous) : null;
@@ -109,8 +124,8 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 		},
 		// No arrow on failures: an arrow up reads as good news.
 		countStat(t(lang, "failedLastDays", { days: range }), failed, failedPrev, lang, false),
-		figureStat(t(lang, "impressionsLastDays", { days: range }), total(days, "impressions"), prevDays ? total(prevDays, "impressions") : null, prevDays !== null, t(lang, "noImpressionsYet"), lang),
-		figureStat(t(lang, "engagementLastDays", { days: range }), total(days, "engagement"), prevDays ? total(prevDays, "engagement") : null, prevDays !== null, t(lang, "noEngagementYet"), lang),
+		figureStat(t(lang, "impressionsLastDays", { days: figureRange }), total(days, "impressions"), prevDays ? total(prevDays, "impressions") : null, prevDays !== null, t(lang, "noImpressionsYet"), lang, splitText(series, "impressions", lang)),
+		figureStat(t(lang, "engagementLastDays", { days: figureRange }), total(days, "engagement"), prevDays ? total(prevDays, "engagement") : null, prevDays !== null, t(lang, "noEngagementYet"), lang, splitText(series, "engagement", lang)),
 	];
 	out.push(stats(items, { blockId: "buffer:stats" }));
 
@@ -133,12 +148,17 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	const notes = [
 		input.stored.report.lastSyncAt ? t(lang, "syncedAgo", { age: formatAge(input.stored.report.lastSyncAt, now, lang) ?? "" }) : t(lang, "notSyncedYet"),
 		t(lang, "todayCounting"),
-		...(since && daysBetween(current.start, since) > 0 ? [t(lang, "figuresSince", { date: formatDay(since, lang) })] : []),
+		...(since && daysBetween(figurePeriod.current.start, since) > 0 ? [t(lang, "figuresSince", { date: formatDay(since, lang) })] : []),
 	];
 	out.push(context(notes.join(" · ")));
 
-	out.push(figureCharts(days, lang));
-	out.push(context(t(lang, "figuresNote")));
+	out.push(figureCharts(series, limited ? figureRange : null, lang));
+	const chartNotes = [
+		t(lang, "figuresNote"),
+		...(series.some((s) => s.origin === "direct" && s.derived) ? [t(lang, "derivedNote")] : []),
+		...(series.some((s) => s.origin === "unsplit") ? [t(lang, "unsplitNote")] : []),
+	];
+	out.push(context(chartNotes.join(" ")));
 
 	out.push(header(t(lang, "topEntries")));
 	out.push(
@@ -178,14 +198,14 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 				{ key: "service", label: t(lang, "colService"), format: "code" },
 				{ key: "sent", label: t(lang, "colSent"), format: "number" },
 				{ key: "failed", label: t(lang, "colFailed"), format: "number" },
-				{ key: "impressions", label: t(lang, "colImpressions"), format: "number" },
-				{ key: "rate", label: t(lang, "colEngagementRate"), format: "text" },
+				{ key: "impressions", label: limited ? t(lang, "colImpressionsDays", { days: figureRange }) : t(lang, "colImpressions"), format: "number" },
+				{ key: "rate", label: limited ? t(lang, "colEngagementRateDays", { days: figureRange }) : t(lang, "colEngagementRate"), format: "text" },
 			],
 			rows,
 			emptyText: t(lang, "channelsTableEmpty"),
 		}),
 	);
-	out.push(context(t(lang, "channelsNote")));
+	out.push(context(limited ? t(lang, "channelsNoteLimited", { days: figureRange }) : t(lang, "channelsNote")));
 
 	const skipped = skippedChannels(input);
 	if (skipped) out.push(context(skipped));
@@ -212,39 +232,50 @@ function countStat(label: string, current: number, previous: number | null, lang
 }
 
 /** A Buffer figure: missing when Buffer reported nothing, never zero. */
-function figureStat(label: string, current: number | undefined, previous: number | undefined | null, reaches: boolean, missing: string, lang: Lang): StatItem {
+function figureStat(
+	label: string,
+	current: number | undefined,
+	previous: number | undefined | null,
+	reaches: boolean,
+	missing: string,
+	lang: Lang,
+	split: string | null = null,
+): StatItem {
 	// The big value stays short ("None yet"); the description says why.
 	if (current === undefined) return { label, value: t(lang, "noneYet"), description: missing };
 	const prev = reaches ? (previous ?? null) : null;
 	const trend = trendOf(current, prev);
-	return { label, value: formatCount(current, lang), description: comparisonText(current, prev, lang), ...(trend && { trend }) };
+	const comparison = comparisonText(current, prev, lang);
+	return { label, value: formatCount(current, lang), description: split ? `${split} · ${comparison}` : comparison, ...(trend && { trend }) };
 }
 
-function figureCharts(days: ReturnType<typeof figuresByDay>, lang: Lang): PageBlock {
-	const engagement = days.filter((d) => d.engagement !== undefined);
-	const impressions = days.filter((d) => d.impressions !== undefined);
+/** "612 direct, 108 via Buffer", when every figure in the range is split by origin and both are known. */
+function splitText(series: OriginSeries[], key: "engagement" | "impressions", lang: Lang): string | null {
+	const totals = originTotals(series, key);
+	return totals ? t(lang, "originSplit", { direct: formatCount(totals.direct, lang), buffer: formatCount(totals.buffer, lang) }) : null;
+}
+
+const SERIES_KEY = { direct: "seriesDirect", buffer: "seriesBuffer", unsplit: "seriesUnsplit" } as const;
+
+/** One line per channel and origin, "Facebook (Direct)", in the host's own palette. Lines without a figure are left out. */
+function figureCharts(series: OriginSeries[], limitedTo: number | null, lang: Lang): PageBlock {
+	const chart = (key: "engagement" | "impressions", blockId: string, yAxisName: string) => {
+		const lines = series
+			.map((s) => ({
+				name: t(lang, SERIES_KEY[s.origin], { network: s.name }),
+				data: s.days.filter((d) => d[key] !== undefined).map((d) => [at(d.day), d[key]!] as [number, number]),
+			}))
+			.filter((line) => line.data.length > 0);
+		return lines.length > 0 ? timeseries(lines, { blockId, height: 220, gradient: lines.length === 1, yAxisName }) : context(t(lang, "noFigures"));
+	};
 	return columns([
 		[
-			header(t(lang, "engagementByDay")),
-			engagement.length > 0
-				? timeseries([{ name: t(lang, "seriesEngagement"), data: engagement.map((d) => [at(d.day), d.engagement!] as [number, number]) }], {
-						blockId: "buffer:chart:engagement",
-						height: 220,
-						gradient: true,
-						yAxisName: t(lang, "axisInteractions"),
-					})
-				: context(t(lang, "noFigures")),
+			header(limitedTo ? t(lang, "engagementByDayLast", { days: limitedTo }) : t(lang, "engagementByDay")),
+			chart("engagement", "buffer:chart:engagement", t(lang, "axisInteractions")),
 		],
 		[
-			header(t(lang, "impressionsByDay")),
-			impressions.length > 0
-				? timeseries([{ name: t(lang, "seriesImpressions"), data: impressions.map((d) => [at(d.day), d.impressions!] as [number, number]) }], {
-						blockId: "buffer:chart:impressions",
-						height: 220,
-						gradient: true,
-						yAxisName: t(lang, "axisTimesShown"),
-					})
-				: context(t(lang, "noFigures")),
+			header(limitedTo ? t(lang, "impressionsByDayLast", { days: limitedTo }) : t(lang, "impressionsByDay")),
+			chart("impressions", "buffer:chart:impressions", t(lang, "axisTimesShown")),
 		],
 	]);
 }
@@ -304,7 +335,8 @@ function banners(input: AnalyticsInput, shared: BufferChannel[]): PageBlock[] {
 	const report = stored.report;
 	if (report.pausedUntil && Date.parse(report.pausedUntil) > now.getTime()) {
 		out.push(banner({ description: t(lang, "bannerRateLimited", { time: formatAge(report.pausedUntil, now, lang) ?? report.pausedUntil }), variant: "alert" }));
-	} else if (report.problem) {
+	} else if (report.problem && historyLimitDays(report.problem.message) === null) {
+		// A history refusal stored by 0.1.1 is not a fault: the context line above says it.
 		out.push(banner({ description: t(lang, "bannerProblem", { message: report.problem.message }), variant: "alert" }));
 	}
 	return out;

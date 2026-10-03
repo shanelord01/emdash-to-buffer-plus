@@ -24,7 +24,7 @@ export interface EntryOverride {
 	entryId: string;
 	/** Channel ids left out for this entry. */
 	skip: string[];
-	/** Custom text (a template: {title}, {excerpt} and {url} still work) per channel id. */
+	/** Custom text (a template: {title}, {description} or {excerpt}, and {url} still work) per channel id. */
 	text: Record<string, string>;
 	updatedAt: string;
 }

@@ -21,6 +21,15 @@
  *
  * No idempotency key is documented for `createPost`, which is why a blind
  * retry after an uncertain answer could post twice.
+ *
+ * Partial answers. error-handling.md shows errors only with `data: null`
+ * and says nothing of `path` or of data beside errors; GraphQL itself
+ * answers a failed field with an error naming the field in `path` and keeps
+ * the other fields, unless the failed field is non-null, which nulls
+ * `data` whole. A request made of aliases can ask `graphql()` to keep the
+ * aliases that answered (`partial`), with each error put against the alias
+ * its `path` names. Every failure carries all of Buffer's error messages in
+ * `errors`, so a caller can tell why each part was refused.
  */
 
 import { capText, isRecord } from "../values.js";
@@ -47,8 +56,22 @@ export type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 
 export type FailureKind = "rejected" | "unauthorized" | "forbidden" | "not_found" | "uncertain" | "rate_limited";
 
+/** One entry of GraphQL's `errors` array, put against the alias its `path` starts with. */
+export interface FieldError {
+	/** `path[0]` when it is a string: the alias, or the field when unaliased. Null when the error names no field. */
+	alias: string | null;
+	message: string;
+	code?: string;
+}
+
 export type BufferResult<T> =
-	| { ok: true; data: T; rateLimit?: RateLimitSnapshot }
+	| {
+			ok: true;
+			data: T;
+			rateLimit?: RateLimitSnapshot;
+			/** Only with `partial`: the aliases Buffer refused while others answered. */
+			refused?: FieldError[];
+	  }
 	| {
 			ok: false;
 			kind: FailureKind;
@@ -57,7 +80,19 @@ export type BufferResult<T> =
 			code?: string;
 			retryAfterSeconds?: number;
 			rateLimit?: RateLimitSnapshot;
+			/** Every message in GraphQL's `errors` array, when the answer had one. */
+			errors?: FieldError[];
 	  };
+
+export interface GraphqlOptions {
+	/**
+	 * The aliases a request is made of. With them, an answer that has data
+	 * for some aliases and errors whose `path` names only others is a
+	 * success: the answered aliases are kept and the rest come back in
+	 * `refused`.
+	 */
+	partial?: string[];
+}
 
 type Failure = Extract<BufferResult<never>, { ok: false }>;
 
@@ -92,7 +127,7 @@ export class BufferClient {
 	}
 
 	/** One GraphQL request. Never throws. */
-	async graphql<T>(query: string, variables: Record<string, unknown> = {}): Promise<BufferResult<T>> {
+	async graphql<T>(query: string, variables: Record<string, unknown> = {}, options: GraphqlOptions = {}): Promise<BufferResult<T>> {
 		let response: Response;
 		try {
 			response = await withTimeout(
@@ -165,12 +200,11 @@ export class BufferClient {
 			});
 		}
 
-		const errors = isRecord(body) && Array.isArray(body.errors) ? body.errors : [];
+		const errors = (isRecord(body) && Array.isArray(body.errors) ? body.errors : []).map(fieldError);
 		if (errors.length > 0) {
-			const first = isRecord(errors[0]) ? errors[0] : {};
-			const extensions = isRecord(first.extensions) ? first.extensions : {};
-			const code = typeof extensions.code === "string" ? extensions.code : undefined;
-			const message = capText(typeof first.message === "string" ? first.message : "Buffer reported an error.", MAX_ERROR_LENGTH);
+			const partial = options.partial && isRecord(body) && isRecord(body.data) ? partialData(body.data, errors, options.partial) : null;
+			if (partial) return withLimit({ ok: true as const, data: partial as T, refused: errors });
+			const { code, message } = errors[0]!;
 			if (code === "RATE_LIMIT_EXCEEDED") {
 				return withLimit<Failure>({
 					ok: false,
@@ -179,10 +213,10 @@ export class BufferClient {
 					status: response.status,
 					retryAfterSeconds: retryAfter(response.headers, this.#now()),
 					message,
+					errors,
 				});
 			}
-			const kind = (code && DEFINITE_CODES[code]) || "uncertain";
-			return withLimit<Failure>({ ok: false, kind, code, status: response.status, message });
+			return withLimit<Failure>({ ok: false, kind: failureKind(code), ...(code && { code }), status: response.status, message, errors });
 		}
 
 		if (!isRecord(body) || !isRecord(body.data)) {
@@ -421,7 +455,7 @@ export class BufferClient {
 		channelIds: string[],
 		since: string,
 		after?: string,
-	): Promise<BufferResult<{ posts: PostState[]; endCursor: string | null; hasNextPage: boolean }>> {
+	): Promise<BufferResult<{ posts: MetricsPost[]; endCursor: string | null; hasNextPage: boolean }>> {
 		const input = {
 			organizationId,
 			filter: { channelIds, status: ["sent"], createdAt: { start: since } },
@@ -434,9 +468,18 @@ export class BufferClient {
 		if (!result.ok) return result;
 		const edges = Array.isArray(result.data.posts?.edges) ? result.data.posts.edges : [];
 		const pageInfo = isRecord(result.data.posts?.pageInfo) ? result.data.posts.pageInfo : {};
-		const posts = edges.flatMap((e) => {
-			const post = parsePostState(isRecord(e) ? e.node : null);
-			return post ? [post] : [];
+		const posts = edges.flatMap((e): MetricsPost[] => {
+			const node = isRecord(e) ? e.node : null;
+			const post = parsePostState(node);
+			if (!post || !isRecord(node)) return [];
+			return [
+				{
+					...post,
+					via: typeof node.via === "string" ? node.via : null,
+					channelId: typeof node.channelId === "string" ? node.channelId : null,
+					createdAt: typeof node.createdAt === "string" ? node.createdAt : null,
+				},
+			];
 		});
 		return {
 			...result,
@@ -455,10 +498,16 @@ export class BufferClient {
 	 * metric types every network in it reports (post-metrics.md,
 	 * "Cross-channel intersection"), which would drop impressions and
 	 * engagementRate for most sites.
+	 *
+	 * Asked as a partial request: an alias Buffer refused comes back in
+	 * `refused` with its window and Buffer's message, and the others keep
+	 * their answers. The reference types the field `AggregatedPostMetrics!`,
+	 * so by GraphQL's rules one refusal should null the whole answer; the
+	 * partial case is handled in case Buffer's server answers otherwise.
 	 */
-	async aggregates(windows: AggregateWindow[]): Promise<BufferResult<AggregateResult[]>> {
+	async aggregates(windows: AggregateWindow[]): Promise<BufferResult<AggregateAnswer>> {
 		const list = windows.slice(0, MAX_ALIASES);
-		if (list.length === 0) return { ok: true, data: [] };
+		if (list.length === 0) return { ok: true, data: { results: [], refused: [] } };
 		const variables: Record<string, unknown> = {};
 		const params: string[] = [];
 		const selections: string[] = [];
@@ -473,17 +522,24 @@ export class BufferClient {
 			selections.push(`a${i}: aggregatedPostMetrics(input: $a${i}) { metrics { type value unit } metricsUpdatedAt }`);
 		});
 		const query = `query Aggregates(${params.join(", ")}) {\n\t${selections.join("\n\t")}\n}`;
-		const result = await this.graphql<Record<string, unknown>>(query, variables);
+		const result = await this.graphql<Record<string, unknown>>(query, variables, { partial: list.map((_, i) => `a${i}`) });
 		if (!result.ok) return result;
-		const out: AggregateResult[] = [];
+		const results: AggregateResult[] = [];
+		const refused: AggregateAnswer["refused"] = [];
 		list.forEach((w, i) => {
+			const error = result.refused?.find((e) => e.alias === `a${i}`);
+			if (error) {
+				refused.push({ window: w, message: error.message, ...(error.code && { code: error.code }) });
+				return;
+			}
 			const raw = result.data[`a${i}`];
 			if (!isRecord(raw)) return;
 			const metrics = metricMap(raw.metrics);
 			if (!metrics) return;
-			out.push({ window: w, metrics, metricsUpdatedAt: typeof raw.metricsUpdatedAt === "string" ? raw.metricsUpdatedAt : null });
+			results.push({ window: w, metrics, metricsUpdatedAt: typeof raw.metricsUpdatedAt === "string" ? raw.metricsUpdatedAt : null });
 		});
-		return { ...result, data: out };
+		const { refused: _errors, ...rest } = result;
+		return { ...rest, data: { results, refused } };
 	}
 }
 
@@ -518,6 +574,17 @@ export interface PostState {
 	metricsUpdatedAt: string | null;
 }
 
+/**
+ * A sent post as the metrics read sees it, with where it was made: `via`
+ * is PostVia (reference.md: `api`, `buffer` or `network`, "Indicates if the
+ * post is created from Buffer or the API").
+ */
+export interface MetricsPost extends PostState {
+	via: string | null;
+	channelId: string | null;
+	createdAt: string | null;
+}
+
 export interface AggregateWindow {
 	organizationId: string;
 	channelId: string;
@@ -531,6 +598,12 @@ export interface AggregateResult {
 	window: AggregateWindow;
 	metrics: MetricMap;
 	metricsUpdatedAt: string | null;
+}
+
+export interface AggregateAnswer {
+	results: AggregateResult[];
+	/** Windows Buffer refused while others in the request answered, each with Buffer's message. */
+	refused: Array<{ window: AggregateWindow; message: string; code?: string }>;
 }
 
 const POST_STATE_FIELDS = `fragment PostState on Post {
@@ -549,6 +622,9 @@ const SENT_METRICS_QUERY = `query SentPostMetrics($input: PostsInput!, $after: S
 		edges {
 			node {
 				...PostState
+				via
+				channelId
+				createdAt
 				metrics {
 					type
 					value
@@ -778,6 +854,35 @@ async function readJson(response: Response): Promise<unknown> {
 	} catch {
 		return undefined;
 	}
+}
+
+/** How a GraphQL error code is sorted: definite codes by the table, anything else uncertain. */
+export function failureKind(code: string | undefined): FailureKind {
+	if (code === "RATE_LIMIT_EXCEEDED") return "rate_limited";
+	return (code && DEFINITE_CODES[code]) || "uncertain";
+}
+
+function fieldError(raw: unknown): FieldError {
+	const error = isRecord(raw) ? raw : {};
+	const extensions = isRecord(error.extensions) ? error.extensions : {};
+	const path = Array.isArray(error.path) ? error.path : [];
+	return {
+		alias: typeof path[0] === "string" ? path[0] : null,
+		message: capText(typeof error.message === "string" ? error.message : "Buffer reported an error.", MAX_ERROR_LENGTH),
+		...(typeof extensions.code === "string" && { code: extensions.code }),
+	};
+}
+
+/**
+ * The data of an answer that is part success, or null when it is not one:
+ * every error must name one of the request's aliases, none may be a rate
+ * limit (that refuses the request, not a field), and at least one alias no
+ * error names must hold an answer.
+ */
+function partialData(data: Record<string, unknown>, errors: FieldError[], aliases: string[]): Record<string, unknown> | null {
+	if (errors.some((e) => e.alias === null || !aliases.includes(e.alias) || e.code === "RATE_LIMIT_EXCEEDED")) return null;
+	const named = new Set(errors.map((e) => e.alias));
+	return aliases.some((a) => !named.has(a) && data[a] !== null && data[a] !== undefined) ? data : null;
 }
 
 function firstErrorMessage(body: unknown): string | undefined {

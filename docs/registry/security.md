@@ -17,4 +17,4 @@ Buffer fetches images itself. The plugin passes an image address only when it is
 
 **Who can do what**
 
-Viewing the Buffer page, the dashboard card, the editor panel and the MCP tools needs the editor role. Discovering channels, saving setup, Retry and Send again need the administrator role.
+Viewing the Buffer Plus page, the dashboard card, the editor panel and the MCP tools needs the editor role. Discovering channels, saving setup, Retry and Send again need the administrator role.

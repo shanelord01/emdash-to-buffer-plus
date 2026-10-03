@@ -3,7 +3,7 @@ You need EmDash 1.1.0 or later with a sandbox runner, a Buffer account with your
 1. Install the plugin from the Registry and review its permissions: read content, read the schema, read media, and network requests to `api.buffer.com` only.
 2. In Buffer, open Settings > API (`https://publish.buffer.com/settings/api`) and create a personal API key.
 3. In EmDash, open Plugins, then this plugin's settings, and paste the key into Buffer API key. Save.
-4. Open Plugins > Buffer and select Setup.
+4. Open Plugins > Buffer Plus and select Setup.
 5. Select Discover channels.
 6. Turn on each channel you want to post to, and choose when it posts (queue, share next, share now or a Buffer draft) and what it attaches (image, link card or nothing). Pinterest also needs a board.
 7. Under Collections, tick the collections to share from and choose where each takes its image.

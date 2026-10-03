@@ -6,6 +6,7 @@
  * render that asked Buffer would ask once per editor per dashboard visit.
  */
 
+import { effectiveDays } from "../buffer/history.js";
 import { t, type Lang } from "../i18n.js";
 import { failedIn, figuresByDay, ledgerReaches, nextQueued, periodOf, queued, sentIn, total } from "../report/figures.js";
 import type { PluginSettings } from "../settings.js";
@@ -51,7 +52,9 @@ export function renderWidget(input: WidgetInput): PageBlock[] {
 	const sentPrev = reaches ? sentIn(ledger, previous) : null;
 	const failed = failedIn(ledger, current);
 	const failedPrev = reaches ? failedIn(ledger, previous) : null;
-	const engagement = total(figuresByDay(aggregates, shared.map((c) => c.id), current), "engagement");
+	// Buffer's figures cover only what the plan allows, should that be under a week.
+	const figureDays = effectiveDays(WIDGET_DAYS, stored.report.insightsHistory?.days);
+	const engagement = total(figuresByDay(aggregates, shared.map((c) => c.id), periodOf(figureDays, now).current), "engagement");
 	const waiting = queued(ledger);
 	const next = nextQueued(ledger, now);
 	const sentTrend = trendOf(sent, sentPrev);
@@ -71,8 +74,8 @@ export function renderWidget(input: WidgetInput): PageBlock[] {
 		]),
 		context(
 			engagement === undefined
-				? t(lang, "widgetNoEngagement", { days: WIDGET_DAYS })
-				: t(lang, "widgetEngagement", { days: WIDGET_DAYS, count: formatCount(engagement, lang) }),
+				? t(lang, "widgetNoEngagement", { days: figureDays })
+				: t(lang, "widgetEngagement", { days: figureDays, count: formatCount(engagement, lang) }),
 		),
 	];
 	if (next?.dueAt) out.push(context(t(lang, "nextQueued", { title: next.title || t(lang, "untitled"), date: formatDay(next.dueAt, lang) })));
