@@ -15,6 +15,13 @@
  *   metrics     daily, and while a pass is under way  3
  *   aggregates  daily, and while backfilling          3 (4 in a chained run)
  *
+ * Every Buffer read first asks the shared-bucket guard
+ * (`src/buffer/headroom.ts`): Buffer counts all of the account's API keys
+ * and MCP connections against one limit, so while a window is below the
+ * reserve the "Leave for other tools" setting asks for, the Buffer phases
+ * are not due, no catch-up chain is started, and the report state records
+ * the pause and when it lifts. The delivery pass is not held back by it.
+ *
  * A run takes the phases in that order and skips one that does not fit;
  * the next run, half an hour later or a minute later when catching up,
  * takes it. Pages and the widget never call Buffer: they read what these
@@ -38,7 +45,7 @@ import { OVERRIDES } from "../store/overrides.js";
 import { REPORT_KEY, type ReportState } from "../store/report.js";
 import { aggregatesDue, AGGREGATES_COST, runAggregatesPhase } from "./aggregates.js";
 import { refreshChannels } from "./channels.js";
-import { bufferClient, isDue, paused, type PhaseContext } from "./common.js";
+import { bufferClient, headroom, isDue, observe, paused, settleHeadroom, type PhaseContext } from "./common.js";
 import { runScanPhase, SCAN_COST, SCAN_EVERY_MS } from "./ledger.js";
 import { metricsDue, METRICS_COST, runMetricsPhase } from "./metrics.js";
 import { runStatusPhase, STATUS_COST, STATUS_EVERY_MS } from "./status.js";
@@ -89,7 +96,7 @@ export async function runSync(rawCtx: PluginContext, task: SyncTask = SYNC_TASK,
 	const chained = task !== SYNC_TASK;
 
 	const p: PhaseContext = { ctx, meter, settings, stored, client: bufferClient(ctx, settings), now, report };
-	const buffer = () => Boolean(p.client) && !paused(p);
+	const buffer = () => Boolean(p.client) && !paused(p) && headroom(p);
 	const stamp = now.toISOString();
 
 	const phases: Phase[] = [
@@ -102,7 +109,15 @@ export async function runSync(rawCtx: PluginContext, task: SyncTask = SYNC_TASK,
 				return buffer() && (!last || now.getTime() - Date.parse(last) >= DAY_MS);
 			},
 			run: async () => {
-				const outcome = await refreshChannels(ctx, settings, stored, now);
+				const outcome = await refreshChannels(ctx, settings, stored, now, (latest) => {
+					observe(p, latest);
+					return headroom(p);
+				});
+				if (!outcome.ok && "paused" in outcome) {
+					// Paused, not failed: tried again once the guard lifts.
+					observe(p, outcome.rateLimit);
+					return;
+				}
 				stored.channels = outcome.cache;
 				report.channelsAt = stamp;
 			},
@@ -156,6 +171,7 @@ export async function runSync(rawCtx: PluginContext, task: SyncTask = SYNC_TASK,
 		await ctx.cron.schedule(next, { schedule: at });
 		report.chain = { next, at };
 	}
+	settleHeadroom(p);
 	await ctx.kv.set(REPORT_KEY, report);
 
 	if (task === SYNC_TASK && meter.left() >= DELIVERY_PASS_MIN) {
@@ -186,9 +202,53 @@ export async function pruneOverrides(ctx: PluginContext, retentionDays: number, 
 	return await ctx.storage[OVERRIDES]!.deleteMany(page.items.map((i) => i.id));
 }
 
-/** Schedule the recurring sync at the interval the settings name. Upserts, so it is safe to repeat. */
-export async function ensureScheduled(ctx: PluginContext, interval: string): Promise<void> {
-	await ctx.cron?.schedule(SYNC_TASK, { schedule: interval });
+/** A fresh per-install offset, 0 to 59, picked once and kept in the plugin state. */
+export function newSyncOffset(random: () => number = Math.random): number {
+	return Math.min(59, Math.floor(random() * 60));
+}
+
+/**
+ * The recurring sync's cron expression: the interval the settings name,
+ * moved off the hour and half hour by the install's own offset.
+ *
+ * Buffer asks scheduled jobs that share an account to stagger their start
+ * times (api-limits.md, "Regulating the request rate"), and every install
+ * starting on :00 and :30 would do the opposite. The minute is never a
+ * multiple of the step, so a 15-minute sync never fires on :00, :15, :30
+ * or :45 and a 30-minute one never on :00 or :30. EmDash parses the
+ * expression with croner in UTC (emdash src/plugins/cron.ts
+ * `nextCronTime`), which takes comma lists in the minute field.
+ */
+export function syncSchedule(interval: string, offset: number): string {
+	const o = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+	const minuteFor = (step: number) => 1 + (o % (step - 1));
+	switch (interval) {
+		case "*/15 * * * *": {
+			const m = minuteFor(15);
+			return `${m},${m + 15},${m + 30},${m + 45} * * * *`;
+		}
+		case "*/30 * * * *": {
+			const m = minuteFor(30);
+			return `${m},${m + 30} * * * *`;
+		}
+		case "0 * * * *":
+			return `${minuteFor(60)} * * * *`;
+		case "0 */6 * * *":
+			return `${minuteFor(60)} */6 * * *`;
+		default:
+			// parseSettings only lets SYNC_INTERVALS through; anything else is run as given.
+			return interval;
+	}
+}
+
+/**
+ * Schedule the recurring sync at the interval the settings name and the
+ * install's offset. Upserts, so it is safe to repeat, and an install that
+ * was scheduled on :00 and :30 moves to its offset the next time this runs
+ * (activation or a page load).
+ */
+export async function ensureScheduled(ctx: PluginContext, interval: string, offset: number): Promise<void> {
+	await ctx.cron?.schedule(SYNC_TASK, { schedule: syncSchedule(interval, offset) });
 }
 
 /**

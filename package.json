@@ -1,6 +1,6 @@
 {
 	"name": "emdash-to-buffer-plus",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"private": true,
 	"description": "EmDash plugin: share newly published entries to Buffer channels and follow how they do.",
 	"keywords": [

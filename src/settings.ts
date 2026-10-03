@@ -27,12 +27,21 @@ export interface PluginSettings {
 	retentionDays: number;
 	/** The recurring sync's cron expression, one of `SYNC_INTERVALS`. */
 	syncInterval: string;
+	/**
+	 * "Leave for other tools": the share (percent) of Buffer's 24-hour and
+	 * 30-day quotas the background reports leave untouched, because every
+	 * API key and MCP connection on the account draws on one bucket.
+	 */
+	headroomPercent: number;
 }
 
 export const DEFAULT_TEMPLATE = "{title}\n\n{excerpt}\n\n{url}";
 export const DEFAULT_RETENTION_DAYS = 180;
 export const MIN_RETENTION_DAYS = 30;
 export const MAX_RETENTION_DAYS = 730;
+export const DEFAULT_HEADROOM_PERCENT = 25;
+export const MIN_HEADROOM_PERCENT = 10;
+export const MAX_HEADROOM_PERCENT = 75;
 
 /**
  * The sync's choices, the same as the `syncInterval` select in
@@ -60,6 +69,7 @@ export function parseSettings(raw: Map<string, unknown>): PluginSettings {
 		syncInterval: (SYNC_INTERVALS as readonly string[]).includes(str(raw.get("syncInterval")))
 			? str(raw.get("syncInterval"))
 			: DEFAULT_SYNC_INTERVAL,
+		headroomPercent: clampNumber(raw.get("headroomPercent"), MIN_HEADROOM_PERCENT, MAX_HEADROOM_PERCENT, DEFAULT_HEADROOM_PERCENT),
 	};
 }
 

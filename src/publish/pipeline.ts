@@ -12,19 +12,26 @@
  *   a continuation. It sends nothing itself, so the page stays fast.
  *
  * See `src/store/deliveries.ts` for the delivery states.
+ *
+ * Buffer counts every API key and MCP connection on the account against one
+ * bucket (api-limits.md). Publishing does not keep the reserve the
+ * background reports keep for other tools (`src/buffer/headroom.ts`): it
+ * sends unless a window is spent (`r` = 0 in the newest reading), and then
+ * waits for that window to reset, exactly as after a 429.
  */
 
 import type { PluginContext } from "emdash/plugin";
 
 import { BufferClient, type BufferResult, type CreatedPost, type CreatePostInput, type BufferPost } from "../buffer/client.js";
+import { currentWindows, publishDecision } from "../buffer/headroom.js";
 import type { RateLimitSnapshot } from "../buffer/ratelimit.js";
 import { postShape } from "../buffer/services.js";
 import { readSettings, type PluginSettings } from "../settings.js";
 import { DELIVERIES, deliveryId, isDue, OPEN_STATUSES, UNKNOWN_GIVE_UP_MS, type Delivery } from "../store/deliveries.js";
-import { readStored, STATE_KEY, type PluginState, type Stored } from "../store/kv.js";
+import { readStored, STATE_KEY, storedReadings, type PluginState, type Stored } from "../store/kv.js";
 import { OVERRIDES, overrideId, parseOverride } from "../store/overrides.js";
 import { metered, type Meter } from "./budget.js";
-import { entryFromEvent, prepareDeliveries } from "./prepare.js";
+import { entryFromEvent, prepareDeliveries, type EntryRef } from "./prepare.js";
 
 /**
  * Two names for the one-shot continuation, alternated. EmDash deletes a
@@ -112,6 +119,18 @@ export function matchesPost(row: Delivery, post: BufferPost): boolean {
 	const strip = (s: string) => norm(s.replace(/https?:\/\/\S+/g, ""));
 	const body = strip(row.text);
 	return body.length >= 20 && strip(post.text) === body;
+}
+
+/** When a spent window resets, if any window is spent: before the first request from what is stored, after each from the response. */
+function spentUntil(stored: Stored, now: Date): number | undefined {
+	const decision = publishDecision(storedReadings(stored, now));
+	return decision.allowed ? undefined : Date.parse(decision.until);
+}
+
+function spentAfter(rateLimit: RateLimitSnapshot | undefined, now: Date): number | undefined {
+	if (!rateLimit) return undefined;
+	const decision = publishDecision(currentWindows([rateLimit], now));
+	return decision.allowed ? undefined : Date.parse(decision.until);
 }
 
 function clientFor(ctx: PluginContext, settings: PluginSettings): BufferClient | null {
@@ -203,9 +222,15 @@ export async function sendPrepared(
 	const pending = rows.filter((r) => r.data.status === "pending");
 	const skipped = rows.length - pending.length;
 
+	// A spent window: nothing is sent, the records wait for its reset.
+	const hold = spentUntil(stored, now);
+	if (hold !== undefined) {
+		for (const row of pending) row.data = { ...row.data, nextAttemptAt: new Date(hold).toISOString() };
+	}
+
 	const afterClaim = meter.left() - 1;
 	const canSendAll = afterClaim - 1 >= pending.length;
-	const sendCount = Math.max(0, Math.min(pending.length, canSendAll ? pending.length : afterClaim - 2));
+	const sendCount = hold !== undefined ? 0 : Math.max(0, Math.min(pending.length, canSendAll ? pending.length : afterClaim - 2));
 	const toSend = pending.slice(0, sendCount);
 	for (const row of toSend) {
 		row.data = { ...row.data, status: "sending", lastAttemptAt: stamp, attempts: row.data.attempts + 1, updatedAt: stamp };
@@ -218,11 +243,11 @@ export async function sendPrepared(
 	const client = clientFor(ctx, settings);
 	const results: Array<{ id: string; data: Delivery }> = [];
 	let rateLimit: RateLimitSnapshot | undefined;
-	let waitUntil: number | undefined;
+	let waitUntil: number | undefined = hold;
 	if (client) {
 		for (const row of toSend) {
 			if (waitUntil !== undefined) {
-				// Rate-limited: the rest wait as well, without a request.
+				// Rate-limited or a window spent: the rest wait as well, without a request.
 				results.push({ id: row.id, data: { ...row.data, status: "pending", nextAttemptAt: new Date(waitUntil).toISOString(), attempts: row.data.attempts - 1 } });
 				continue;
 			}
@@ -230,6 +255,7 @@ export async function sendPrepared(
 			if (result.rateLimit) rateLimit = result.rateLimit;
 			const updated = applyResult(row.data, result, now);
 			if (!result.ok && result.kind === "rate_limited") waitUntil = Date.parse(updated.nextAttemptAt);
+			else waitUntil = spentAfter(result.rateLimit, now);
 			results.push({ id: row.id, data: updated });
 		}
 	}
@@ -248,6 +274,41 @@ export async function sendPrepared(
 	if (rateLimit) await saveState(ctx, meter, stored.state, { rateLimit });
 
 	return { kind: "prepared", sent: results.filter((r) => r.data.status === "sent").length, deferred, skipped };
+}
+
+/**
+ * The editor panel's Share now: the first send of one entry that was
+ * published before the plugin started watching, done by hand. The same
+ * preparation and sending as a publish (link, image, UTM, per-service
+ * rules, skip reasons, claims, continuations, the publish check), with the
+ * editor's saved choices for the entry, and every record marked
+ * `origin: "manual"`. The watch itself is left as it is, so no other old
+ * entry is shared. The caller has checked that the entry is published,
+ * older than the watch and has no records yet.
+ *
+ * Bridge calls: the public URL and the media lookup (2 at most), then
+ * `sendPrepared`'s claim, sends, results and continuation from what is left.
+ */
+export async function shareNow(
+	ctx: PluginContext,
+	meter: Meter,
+	settings: PluginSettings,
+	stored: Stored,
+	entry: EntryRef,
+	overrides: { skip: string[]; text: Record<string, string> } | null,
+	now: Date,
+): Promise<{ outcome: PublishOutcome; rows: Array<{ id: string; data: Delivery }> }> {
+	const rows = await prepareDeliveries(ctx, {
+		entry,
+		settings,
+		config: stored.config,
+		channels: stored.channels,
+		now,
+		...(overrides && { overrides }),
+	});
+	for (const row of rows) row.data = { ...row.data, origin: "manual" };
+	if (rows.length === 0) return { outcome: { kind: "ignored", why: "noChannels" }, rows };
+	return { outcome: await sendPrepared(ctx, meter, settings, stored, rows, now), rows };
 }
 
 export interface RunOutcome {
@@ -286,7 +347,8 @@ export async function runDeliveries(
 	const RESERVE = 3;
 	const updates = new Map<string, Delivery>();
 	let rateLimit: RateLimitSnapshot | undefined;
-	let waitUntil: number | undefined;
+	// A spent window stops the run before any request: sends and look-ups both count.
+	let waitUntil: number | undefined = spentUntil(stored, now);
 	let sent = 0;
 	let resolved = 0;
 	const stamp = now.toISOString();
@@ -300,6 +362,7 @@ export async function runDeliveries(
 			const since = new Date(Date.parse(current.lastAttemptAt ?? current.createdAt) - LOOKUP_SLACK_MS).toISOString();
 			const lookup = await client.recentPosts(current.organizationId, current.channelId, since);
 			if (lookup.rateLimit) rateLimit = lookup.rateLimit;
+			if (lookup.ok) waitUntil = spentAfter(lookup.rateLimit, now);
 			if (!lookup.ok) {
 				if (lookup.kind === "rate_limited") {
 					waitUntil = now.getTime() + (lookup.retryAfterSeconds ?? 60) * 1000;
@@ -332,7 +395,8 @@ export async function runDeliveries(
 				updates.set(row.id, confirmed);
 				continue;
 			}
-			// Buffer has no such post: safe to send.
+			// Buffer has no such post: safe to send, unless the look-up spent a window.
+			if (waitUntil !== undefined) break;
 		}
 
 		if (meter.left() < RESERVE + 2) {
@@ -353,6 +417,7 @@ export async function runDeliveries(
 		updates.set(row.id, updated);
 		if (updated.status === "sent") sent++;
 		if (!result.ok && result.kind === "rate_limited") waitUntil = Date.parse(updated.nextAttemptAt);
+		else waitUntil = spentAfter(result.rateLimit, now);
 	}
 
 	if (updates.size > 0) {
@@ -373,7 +438,8 @@ export async function runDeliveries(
 			}),
 			waitUntil ?? Number.POSITIVE_INFINITY,
 		);
-		const at = Math.max(now.getTime() + CONTINUATION_DELAY_MS, Number.isFinite(earliest) ? earliest : 0);
+		// While Buffer says wait (a 429 or a spent window), nothing goes before it.
+		const at = Math.max(now.getTime() + CONTINUATION_DELAY_MS, waitUntil ?? (Number.isFinite(earliest) ? earliest : 0));
 		next = continuationAfter(opts.task ?? stored.state.lastContinuation);
 		if (meter.left() >= 1) await scheduleContinuation(ctx, next, new Date(at));
 	}

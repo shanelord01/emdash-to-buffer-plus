@@ -1,9 +1,10 @@
 # EmDash to Buffer Plus
 
-Shares newly published EmDash entries to your Buffer channels, and shows
-how each post did. Each post's text is fitted to the network, it carries
-the entry's image or a link card, and every delivery is tracked from the
-moment it leaves your site to the live post.
+Shares new EmDash entries to your Buffer channels, fitted to each
+network, with delivery tracking, an engagement dashboard, an editor panel
+and MCP tools. Each post carries the entry's image or a link card, every
+delivery is followed from your site to the live post, and the Buffer page
+and dashboard card show how each post did.
 
 The plugin uses the Buffer API with a personal API key. It is not made,
 endorsed or supported by Buffer.
@@ -16,6 +17,23 @@ report what you find in the repository's issues.
 
 ## What's new
 
+**0.1.1, 3 October 2026**
+- Buffer counts every API key and connected assistant on your account
+  against one shared limit. The background reports now stop while less
+  than the new "Leave for other tools" share is left (25% by default),
+  and the Buffer page says when they resume. Posts still go out, and
+  wait only when Buffer has no requests left at all.
+- The recurring sync runs at a minute of its own on each site instead of
+  on the hour and half hour.
+- Share now in the editor panel sends an entry published before the
+  plugin started watching, by hand, to the channels you choose.
+- Tidier dashboard card and stat cards, an empty chart says so, and the
+  Setup view marks each channel rule as documented or from Buffer.
+- A new section, "Buffer's API limits", explains Buffer's limits and what
+  happens when they are reached.
+- No new permissions and no MCP tool output changes, so Agent access
+  stays on after the update.
+
 **0.1.0, 3 October 2026**
 - First release: sharing to every network Buffer's API can post to, a
   Buffer page with analytics and setup, a dashboard card, an editor panel
@@ -26,8 +44,8 @@ report what you find in the repository's issues.
 | Where | What you see |
 |---|---|
 | Plugins > Buffer | Posts sent, queued and failed over 7, 30 or 90 days with a daily chart, impressions and engagement by day, top entries, a table per channel, and banners for anything that needs a person. Its Setup view holds the channels, collections, link tags and failed deliveries |
-| Dashboard | A Buffer card: the last seven days' sent and failed posts, engagement, and the next queued post |
-| Entry editor | A Buffer panel: before the first send, choose channels and write custom text for this entry; after, each channel's state and a link to the live post |
+| Dashboard | A Buffer card: the last seven days' sent and failed posts, what is queued, a line on engagement, and the next queued post |
+| Entry editor | A Buffer panel: before the first send, choose channels and write custom text for this entry; after, each channel's state and a link to the live post. An entry published before the plugin started watching can be shared by hand |
 | MCP | Four read-only tools that give an AI agent the same information |
 
 ## What you need
@@ -37,6 +55,7 @@ report what you find in the repository's issues.
 | EmDash | 1.1.0 or later, with a plugin sandbox runner configured (registry plugins run in the sandbox) |
 | A Buffer account | with the channels you want to post to connected in Buffer |
 | A personal API key | from Buffer, see "Create the Buffer key" below |
+| Room in Buffer's API limit | Buffer limits API requests per account, shared by every API key and connected assistant: 250 a day and 3,000 in 30 days on the Free plan. The plugin uses about 40 to 50 a day for 10 channels. See "Buffer's API limits" below |
 | `EMDASH_ENCRYPTION_KEY` | set on the site, so the API key can be saved encrypted. Without it, saving the key fails. `npx emdash secrets generate` makes one |
 | URL patterns | each collection you share from needs a URL Pattern (under Content Types), so its entries have a public link |
 | Scheduled tasks | the sync runs as a plugin cron task. On Node, EmDash runs it. On Cloudflare Workers it needs the Cron Trigger from EmDash's Cloudflare deployment guide |
@@ -73,7 +92,8 @@ Open Plugins in the admin, then the plugin's settings.
 | Share new entries | On by default. Turn it off to stop sending without losing channels, settings or history |
 | Post text | The text of each post. `{title}`, `{excerpt}` and `{url}` are filled in and line breaks are kept. The default is the title, the excerpt and the link on separate lines |
 | Keep delivery history for | 180 days by default, 30 to 730. Older records are deleted a hundred at a time |
-| Sync every | 30 minutes by default. How often the plugin checks Buffer for post status and figures and retries anything waiting |
+| Sync every | 30 minutes by default. How often the plugin checks Buffer for post status and figures and retries anything waiting. Each site runs it at a minute of its own, never on the hour or half hour |
+| Leave for other tools | 25% by default, 10 to 75. The share of Buffer's daily and 30-day limits the background reports leave for your other API keys and connected assistants. See "What the plugin requests" |
 
 ## Setup page
 
@@ -100,8 +120,9 @@ Open Plugins > Buffer and select Setup.
    `utm_campaign` to every link. The campaign is the channel's network.
    Tags already on a link are kept as they are.
 
-Only entries first published after the plugin was installed are shared.
-Older entries never are, and republishing an entry never sends it again.
+Only entries first published after the plugin started watching are
+shared automatically. An older entry can be shared by hand with Share now
+in its editor panel. Republishing an entry never sends it again.
 
 ## Which networks work
 
@@ -167,7 +188,7 @@ Each entry and channel has one delivery record, in one of these states:
 
 | State | Meaning |
 |---|---|
-| Waiting | not sent yet, or waiting because Buffer asked the plugin to slow down |
+| Waiting | not sent yet, or held because Buffer's API limit is used up. It goes out by itself when the limit refills (see "Buffer's API limits") |
 | Sending | a request is on its way |
 | Queued, posted, draft | Buffer took the post. The plugin follows it until the network publishes it, then links to the live post |
 | Checking | the request may have reached Buffer (a timeout or a server error). The plugin looks for the post in Buffer before it sends anything again |
@@ -180,6 +201,74 @@ recent posts. That is how it avoids double posts. A failed delivery is
 sent again only when someone selects Retry, on the Buffer page or in the
 editor panel. Buffer's own publishing errors (for example an expired
 connection) are shown with Buffer's message; fix those in Buffer.
+
+## Buffer's API limits
+
+Buffer limits how many API requests each Buffer account can make. The
+limit belongs to the account, not to this plugin: every API key and every
+assistant connected to Buffer (Claude, ChatGPT or another MCP client)
+draws on the same allowance.
+
+| Buffer plan | Every 15 minutes | Every 24 hours | Every 30 days |
+|---|---|---|---|
+| Free | 100 | 250 | 3,000 |
+| Essentials | 100 | 250 | 7,500 |
+| Team | 100 | 500 | 15,000 |
+
+These figures are from Buffer's
+[API limits guide](https://developers.buffer.com/guides/api-limits.md)
+and can change. Every request counts, including one that fails. Only a
+request Buffer turns away with "too many requests" is given back. The
+windows roll: each one refills as its oldest requests age out.
+
+The plugin reads how many requests are left from every answer Buffer
+sends. The Setup view shows it ("Buffer requests left") and so does the
+`channel_health` MCP tool.
+
+### What happens when the limit is reached
+
+Posts are never dropped, but they can go out late.
+
+- **New posts wait.** When Buffer has no requests left in any window, or
+  answers "too many requests", a new entry's posts are not sent. Each
+  delivery shows "waiting to be sent, next try" with a time, on the Buffer
+  page and in the entry's editor panel. The plugin sends them by itself
+  when that window refills, the longest-waiting first.
+- **How late depends on the window.** A spent 15-minute window holds posts
+  for at most 15 minutes, a spent daily window for up to a day, and a
+  spent 30-day window for as long as Buffer says, which can be days. With
+  "Add to the queue", Buffer then gives the post the next free slot after
+  it arrives, so it may publish later than it would have.
+- **Reports pause first.** Status checks, figures and the channel refresh
+  stop well before the limit, while less than the "Leave for other tools"
+  share (25% by default) of the daily or 30-day allowance is left, or
+  fewer than 20 of the 15-minute window. The Analytics and Setup views say
+  "Reports paused to leave Buffer requests for your other tools until"
+  a time. Figures and post status are not updated while paused, and
+  resume by themselves.
+- **Nothing to retry.** Waiting posts need no action. Retry is only for
+  posts Buffer refused.
+
+### Buffer's posting limits are different
+
+Buffer also limits how many posts each channel can publish a day. That is
+a separate limit from API requests. The Buffer page shows "At today's
+posting limit in Buffer" for a channel that has reached it. If Buffer
+refuses a post for that reason, the delivery shows Failed with Buffer's
+message. Select Retry once the channel's day has rolled over.
+
+### If you keep reaching the limit
+
+- Check what else uses your Buffer account's API: other API keys and
+  connected assistants count against the same allowance (Buffer lists them
+  under Settings > API).
+- Set "Sync every" to a longer interval, so status and figures are read
+  less often.
+- Share to fewer channels, or move to a Buffer plan with a higher limit.
+- Raise "Leave for other tools" to keep more for your other tools, or
+  lower it to give the plugin's reports more.
+- Buffer asks anyone who needs more to write to
+  developersupport@buffer.com.
 
 ## Reports
 
@@ -194,7 +283,7 @@ connection) are shown with Buffer's message; fix those in Buffer.
 
 A missing figure is not zero. Buffer only lists the figures a network
 reports, and a post Buffer has not read yet has none. The pages show
-those as "No figures yet".
+those as "None yet" or "No figures yet".
 
 Impressions, engagement and the engagement rate are Buffer's figures for
 every post on the shared channels, including posts made in Buffer itself,
@@ -215,11 +304,14 @@ Only Buffer's GraphQL API at `https://api.buffer.com`, with your key.
 | After install | a one-off backfill of up to 180 days of channel figures |
 
 For 10 shared channels that comes to about 40 to 50 requests a day,
-after a backfill of about 60 requests spread over the first hour. Buffer
-allows 100 requests per 15 minutes and 250 a day on its Free plan (and
-3,000 in 30 days), counted per API key. Any other tool that uses the same
-key shares those limits. When Buffer asks the plugin to slow down, it
-waits as long as Buffer says.
+about 1,200 to 1,500 a month, after a backfill of about 60 requests
+spread over the first hour.
+
+Those requests come out of your Buffer account's shared API limit. See
+"Buffer's API limits" for the numbers, how the plugin leaves room for your
+other tools, and what happens when the limit is reached. The recurring
+sync runs at a minute picked at random for each site, so sites do not all
+ask Buffer at the same moment.
 
 ## Editor panel
 
@@ -232,6 +324,12 @@ an entry is being created.
 - Before the entry is first sent: a switch per channel to leave it out
   for this entry, and a text field for custom text on that channel
   (`{title}`, `{excerpt}` and `{url}` still work). Save, then publish.
+- An entry first published before the plugin started watching: a line
+  saying it was not shared automatically. Administrators also get the
+  same choices and Share now, which asks for confirmation and then sends
+  this entry, and only this one, as if it had just been published. Its
+  posts show "Shared by hand". Editors see the line and a link to the
+  Buffer page.
 - After: each channel's state, the time a queued post is due (in UTC), a
   link to the live post, Buffer's reason when it failed, and the skip
   reason when it was skipped. Administrators also see Retry for a failed
@@ -265,7 +363,7 @@ answer from what the plugin stored and never call Buffer.
 - Images are fetched by Buffer, not by the plugin, and only from the
   addresses described under "How links and images are chosen".
 - Viewing the Buffer page, the card and the panel needs the editor role;
-  discovering channels, saving settings, Retry and Send again need the
+  discovering channels, saving settings, Retry, Send again and Share now need the
   administrator role.
 - Delivery records and figures are stored in your site's database and
   pruned after the retention period.
@@ -290,7 +388,6 @@ Whether that fits your use is for you to decide with Buffer.
 
 - Video posts, threads, first comments and Buffer's tags and ideas.
 - A tested run on every network. See the note at the top.
-- Sending an entry that was published before the plugin was installed.
 - Choosing a different image per channel.
 - Figures for more than ten channels.
 - Languages other than English in the admin.

@@ -16,7 +16,7 @@
 
 import { DELIVERIES, type Delivery } from "../store/deliveries.js";
 import { utcDay } from "../store/report.js";
-import { noteFailure, type PhaseContext } from "./common.js";
+import { headroom, noteFailure, observe, type PhaseContext } from "./common.js";
 
 export const METRICS_DAYS = 30;
 export const METRICS_COST = 3;
@@ -54,7 +54,9 @@ export async function runMetricsPhase(p: PhaseContext): Promise<void> {
 	}
 
 	const since = new Date(p.now.getTime() - METRICS_DAYS * 86_400_000).toISOString();
+	if (!headroom(p)) return;
 	const result = await client.sentPostMetrics(target.organizationId, target.channelIds, since, state.cursor);
+	observe(p, result.rateLimit);
 	if (!result.ok) {
 		noteFailure(p, result);
 		return;

@@ -20,6 +20,7 @@
  */
 
 import type { MetricMap } from "../buffer/metrics.js";
+import type { RateLimitSnapshot } from "../buffer/ratelimit.js";
 import { engagementOf, engagementRateOf, impressionsOf } from "../buffer/metrics.js";
 import { capText, isRecord } from "../values.js";
 import type { Delivery } from "./deliveries.js";
@@ -107,6 +108,14 @@ export interface ReportState {
 	pausedUntil?: string;
 	/** The last report read that failed, for the page. */
 	problem?: { at: string; kind: string; message: string };
+	/** The newest RateLimit reading a report run received, kept with the state the run writes anyway. */
+	rateLimit?: RateLimitSnapshot;
+	/**
+	 * Background reads are paused to leave Buffer requests for the account's
+	 * other tools, until `until` (when the window that ran low resets).
+	 * Not a failure: posts still go out.
+	 */
+	headroom?: { at: string; until: string; window: number };
 	/** The chained one-shot run scheduled last. */
 	chain?: { next: string; at: string };
 	lastSyncAt?: string;

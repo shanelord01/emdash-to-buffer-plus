@@ -20,7 +20,7 @@
 
 	// The registry refuses a description over 140 graphemes;
 	// `emdash-plugin validate` does not check it. At most five keywords.
-	"description": "Share newly published entries to your Buffer channels, with text fitted to each network, images or link cards, and tracked delivery.",
+	"description": "Share new entries to Buffer, fitted to each network, with delivery tracking, an engagement dashboard, an editor panel and MCP tools.",
 	"keywords": ["buffer", "social", "syndication", "sharing", "publishing"],
 
 	// Trust contract: exactly what the code calls.
@@ -119,6 +119,14 @@
 					{ "value": "0 */6 * * *", "label": "6 hours" }
 				],
 				"description": "How often the plugin checks Buffer for post status and figures, and retries anything waiting. Buffer refreshes figures about once a day."
+			},
+			"headroomPercent": {
+				"type": "number",
+				"label": "Leave for other tools",
+				"default": 25,
+				"min": 10,
+				"max": 75,
+				"description": "Percent, 10 to 75. Buffer counts every API key and connected assistant on your account against one shared limit. The plugin's background reports stop while less than this share of Buffer's daily and 30-day limits is left. Posts still go out."
 			}
 		},
 

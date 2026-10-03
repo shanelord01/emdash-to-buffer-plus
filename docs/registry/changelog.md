@@ -1,12 +1,14 @@
+## 0.1.1, 3 October 2026
+
+- Buffer's API limit is shared by every API key and connected assistant on an account. Background reports now stop while less than the new "Leave for other tools" share is left (25% by default). Posts still go out, and wait only when Buffer has no requests left at all.
+- The docs explain Buffer's limits and what happens when they are reached: posts wait and go out by themselves when the limit refills.
+- Share now in the editor panel sends an entry published before the plugin started watching.
+- The sync runs at a minute of its own on each site.
+- Tidier dashboard card and stat cards, and the Setup view marks each channel rule as documented or from Buffer.
+- No new permissions and no MCP tool output changes.
+
 ## 0.1.0, 3 October 2026
 
-First release.
+First release: sharing to every network Buffer's API can post to, delivery tracking without double posts, a Buffer page with analytics and setup, a dashboard card, an editor panel and four read-only MCP tools. Based on emdash-to-buffer-plugin by Justin Thompson (MIT).
 
-- Shares newly published entries to Buffer, on every network Buffer's API can post to, with text fitted to each network's limit and the entry's image or a link card.
-- Tracks every delivery: queued, posted with a link to the live post, failed with Buffer's reason and a Retry, or skipped with the reason. An uncertain answer is checked in Buffer before anything is sent again.
-- A Buffer page with analytics (sent, queued, failed, impressions and engagement over 7, 30 or 90 days, top entries, per channel) and a Setup view for channels, collections and link tags.
-- A dashboard card with the last seven days.
-- An editor panel: leave out channels or write custom text before an entry is first sent, see each channel's state after, and Send again with a confirmation.
-- Four read-only MCP tools: `entry_status`, `recent_deliveries`, `channel_health` and `engagement_summary`.
-
-Based on emdash-to-buffer-plugin by Justin Thompson (MIT).
+Full history: [CHANGELOG.md](https://github.com/shanelord01/emdash-to-buffer-plus/blob/main/CHANGELOG.md).

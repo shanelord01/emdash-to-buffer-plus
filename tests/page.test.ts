@@ -118,8 +118,9 @@ describe("the setup section", () => {
 		expect(response.toast).toMatchObject({ type: "success" });
 		const cache = await host.inspect.kv.get<ChannelCache>("channels");
 		expect(cache?.hints).toBeUndefined();
-		expect(text(response)).toContain("Buffer's documented defaults apply");
-		expect(text(response)).toContain("3000 characters");
+		expect(text(response)).toContain("did not answer when the channels were read");
+		expect(text(response)).toContain("every rule is Buffer's documented default");
+		expect(text(response)).toContain("3000 characters (documented)");
 		expect(text(response)).not.toContain("from Buffer)");
 	});
 

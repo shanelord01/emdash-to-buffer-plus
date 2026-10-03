@@ -16,7 +16,7 @@ import type { PluginContext, SandboxedPlugin } from "emdash/plugin";
 import { CONTINUATION_TASKS, onPublished, runDeliveries } from "./publish/pipeline.js";
 import { readSettings } from "./settings.js";
 import { readStored, STATE_KEY } from "./store/kv.js";
-import { ensureScheduled, isSyncTask, runSync } from "./sync/sync.js";
+import { ensureScheduled, isSyncTask, newSyncOffset, runSync } from "./sync/sync.js";
 import { channelHealth, engagementSummary, entryStatus, recentDeliveries, TOOL_ROUTES } from "./tools/load.js";
 import { mcpTools } from "./tools/declare.js";
 import { handleAdmin } from "./ui/handlers.js";
@@ -130,12 +130,20 @@ async function share(ctx: PluginContext, event: unknown): Promise<void> {
 	}
 }
 
-/** Start watching for new entries (once) and schedule the sync at the chosen interval. */
+/**
+ * Start watching for new entries (once), pick the install's sync offset
+ * (once, in the same write) and schedule the sync at the chosen interval.
+ */
 async function startWatching(ctx: PluginContext): Promise<void> {
 	const settings = await readSettings(ctx);
 	const stored = await readStored(ctx);
-	if (!stored.state.watchSince) await ctx.kv.set(STATE_KEY, { ...stored.state, watchSince: new Date().toISOString() });
-	await ensureScheduled(ctx, settings.syncInterval);
+	const state = {
+		...stored.state,
+		watchSince: stored.state.watchSince ?? new Date().toISOString(),
+		syncOffset: stored.state.syncOffset ?? newSyncOffset(),
+	};
+	if (!stored.state.watchSince || stored.state.syncOffset === undefined) await ctx.kv.set(STATE_KEY, state);
+	await ensureScheduled(ctx, settings.syncInterval, state.syncOffset);
 }
 
 export default plugin;

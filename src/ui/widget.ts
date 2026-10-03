@@ -56,19 +56,24 @@ export function renderWidget(input: WidgetInput): PageBlock[] {
 	const next = nextQueued(ledger, now);
 	const sentTrend = trendOf(sent, sentPrev);
 
+	// Three short cards fit a half-width widget (the Umami plugin's is half
+	// width too). Engagement goes in a line of text, so a missing figure
+	// never becomes a card's big value.
 	const out: PageBlock[] = [
 		stats([
-			{ label: t(lang, "sentLastDays", { days: WIDGET_DAYS }), value: formatCount(sent, lang), description: comparisonText(sent, sentPrev, lang), ...(sentTrend && { trend: sentTrend }) },
-			{ label: t(lang, "failedLastDays", { days: WIDGET_DAYS }), value: formatCount(failed, lang), description: comparisonText(failed, failedPrev, lang) },
-			engagement === undefined
-				? { label: t(lang, "engagementLastDays", { days: WIDGET_DAYS }), value: t(lang, "noFigures"), description: t(lang, "noEngagementYet") }
-				: { label: t(lang, "engagementLastDays", { days: WIDGET_DAYS }), value: formatCount(engagement, lang) },
+			{ label: t(lang, "widgetSent"), value: formatCount(sent, lang), description: comparisonText(sent, sentPrev, lang), ...(sentTrend && { trend: sentTrend }) },
+			{ label: t(lang, "widgetFailed"), value: formatCount(failed, lang), description: comparisonText(failed, failedPrev, lang) },
 			{
-				label: t(lang, "queuedNow"),
+				label: t(lang, "widgetQueued"),
 				value: formatCount(waiting.length, lang),
 				description: waiting.length === 0 ? t(lang, "queuedNone") : next?.dueAt ? t(lang, "queuedNext", { date: formatDay(next.dueAt, lang) }) : t(lang, "queuedWaiting"),
 			},
 		]),
+		context(
+			engagement === undefined
+				? t(lang, "widgetNoEngagement", { days: WIDGET_DAYS })
+				: t(lang, "widgetEngagement", { days: WIDGET_DAYS, count: formatCount(engagement, lang) }),
+		),
 	];
 	if (next?.dueAt) out.push(context(t(lang, "nextQueued", { title: next.title || t(lang, "untitled"), date: formatDay(next.dueAt, lang) })));
 	out.push(context(t(lang, "thisWeekNote")));

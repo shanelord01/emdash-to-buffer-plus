@@ -64,6 +64,12 @@ export interface Delivery {
 	boardServiceId?: string;
 	/** The channel's configuration hints when the record was prepared, so the send builds the same post. */
 	hints?: ChannelHints;
+	/**
+	 * "manual": an administrator shared the entry with the editor panel's
+	 * Share now, because it was published before the plugin started
+	 * watching. Absent for the automatic share on publish.
+	 */
+	origin?: "manual";
 	mode: "addToQueue" | "shareNext" | "shareNow" | "draft";
 	attach: "image" | "link" | "none";
 	/** Why the record is skipped or failed, as a message key or Buffer's own words. */

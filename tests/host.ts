@@ -135,6 +135,26 @@ export function created(id: string, extra: Record<string, unknown> = {}): Respon
 	);
 }
 
+/** RateLimit headers for the Free plan's three windows, as api-limits.md shows them, with the space after each `;`. */
+export function limits(r15: number, rDay: number, r30: number): Record<string, string> {
+	return {
+		ratelimit: `"100-in-15min"; r=${r15}; t=800, "250-in-1day"; r=${rDay}; t=80000, "3000-in-30days"; r=${r30}; t=2000000`,
+		"ratelimit-policy": '"100-in-15min"; q=100; w=900, "250-in-1day"; q=250; w=86400, "3000-in-30days"; q=3000; w=2592000',
+	};
+}
+
+/** A stored reading, taken a minute ago, for seeding state. */
+export function reading(r15: number, rDay: number, r30: number, at = new Date(NOW.getTime() - 60_000)) {
+	return {
+		at: at.toISOString(),
+		windows: [
+			{ name: "100-in-15min", window: 900, quota: 100, remaining: r15, resetSeconds: 800 },
+			{ name: "250-in-1day", window: 86_400, quota: 250, remaining: rDay, resetSeconds: 80_000 },
+			{ name: "3000-in-30days", window: 2_592_000, quota: 3000, remaining: r30, resetSeconds: 2_000_000 },
+		],
+	};
+}
+
 export function mutationError(message: string): Response {
 	return json({ data: { createPost: { message } } });
 }

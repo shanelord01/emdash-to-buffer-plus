@@ -7,6 +7,11 @@
  * organization), daily limits (likewise), configuration (likewise), then one
  * KV write. The Discover button runs it now; the sync runs it daily.
  *
+ * The recurring sync passes `mayRequest`, the shared-bucket guard, which
+ * is asked before each request with the newest reading so far; when it
+ * says no, the refresh stops, writes nothing and hands back the reading,
+ * and the last good snapshot stays. Discover, pressed by a person, does not.
+ *
  * A failure keeps the last good channel list and records what went wrong.
  * The configuration query is Experimental and only a hint: when it fails,
  * the snapshot has no hints and the documented rules apply.
@@ -21,13 +26,16 @@ import { CHANNELS_KEY, type ChannelCache, type Stored } from "../store/kv.js";
 
 export type RefreshOutcome =
 	| { ok: true; cache: ChannelCache }
-	| { ok: false; kind: string; message: string; cache: ChannelCache | null };
+	| { ok: false; kind: string; message: string; cache: ChannelCache | null }
+	/** Stopped by the shared-bucket guard before a request. Nothing was written. */
+	| { ok: false; kind: "headroom"; paused: true; message: string; cache: ChannelCache | null; rateLimit?: RateLimitSnapshot };
 
 export async function refreshChannels(
 	ctx: PluginContext,
 	settings: PluginSettings,
 	stored: Stored,
 	now: Date,
+	mayRequest?: (latest: RateLimitSnapshot | undefined) => boolean,
 ): Promise<RefreshOutcome> {
 	if (!settings.accessToken || !ctx.http) {
 		return { ok: false, kind: "noToken", message: "No Buffer API key is set.", cache: stored.channels };
@@ -47,20 +55,34 @@ export async function refreshChannels(
 		return { ok: false, kind, message, cache };
 	};
 
+	const pause = (): RefreshOutcome => ({
+		ok: false,
+		kind: "headroom",
+		paused: true,
+		message: "Paused to leave Buffer requests for other tools.",
+		cache: stored.channels,
+		...(rateLimit && { rateLimit }),
+	});
+	const allowed = () => !mayRequest || mayRequest(rateLimit);
+
+	if (!allowed()) return pause();
 	const orgs = await client.organizations();
 	if (orgs.rateLimit) rateLimit = orgs.rateLimit;
 	if (!orgs.ok) return await fail(orgs.kind, orgs.message);
 
 	const orgIds = orgs.data.map((o) => o.id).slice(0, MAX_ORGANIZATIONS);
+	if (!allowed()) return pause();
 	const channels = await client.channels(orgIds);
 	if (channels.rateLimit) rateLimit = channels.rateLimit;
 	if (!channels.ok) return await fail(channels.kind, channels.message);
 
 	const byOrg = new Map<string, string[]>();
 	for (const c of channels.data) byOrg.set(c.organizationId, [...(byOrg.get(c.organizationId) ?? []), c.id]);
+	if (!allowed()) return pause();
 	const limits = await client.dailyLimits(byOrg);
 	if (limits.rateLimit) rateLimit = limits.rateLimit;
 
+	if (!allowed()) return pause();
 	const config = await client.configurationHints(orgIds);
 	if (config.rateLimit) rateLimit = config.rateLimit;
 
