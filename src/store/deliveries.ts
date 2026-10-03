@@ -58,6 +58,13 @@ export interface Delivery {
 	url: string;
 	imageUrl?: string;
 	imageAlt?: string;
+	/**
+	 * Why a record whose stored image address needed signing in (0.1.3 and
+	 * earlier) goes without an image after its repair: "noPublicAddress"
+	 * when the entry has no public address for it, "entryUnreadable" when
+	 * the entry could not be read.
+	 */
+	imageIssue?: "noPublicAddress" | "entryUnreadable";
 	/** The link card's description: the entry's excerpt. */
 	linkDescription?: string;
 	/** Pinterest: the board chosen for the channel when the record was prepared. */

@@ -38,7 +38,7 @@ import {
 import type { PluginSettings } from "../settings.js";
 import { channelConfig, hintsFor, limitFor, storedReadings, type Stored } from "../store/kv.js";
 import { daysBetween, RANGES, type Aggregates, type Day, type Ledger, type Origins, type RangeDays } from "../store/report.js";
-import { actions, banner, button, columns, context, dailyChart, empty, header, link, stats, table, type PageBlock, type StatItem } from "./blocks.js";
+import { actions, banner, button, chartColour, columns, context, dailyChart, empty, header, link, stats, table, type PageBlock, type StatItem } from "./blocks.js";
 import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatShortDay, formatTime, trendOf } from "./format.js";
 
 export const RANGE_ACTION = "buffer:range";
@@ -170,7 +170,7 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	out.push(context(notes.join(" · ")));
 
 	const figureDays = daysIn(figurePeriod.current);
-	const drawn = figureCharts(series, figureDays, limited ? figureRange : null, lang);
+	const drawn = figureCharts(series, ids, figureDays, limited ? figureRange : null, lang);
 	out.push(drawn.block);
 	const chartNotes = [
 		...(drawn.capped ? [t(lang, "chartBusiest", { count: drawn.capped.shown, total: drawn.capped.total })] : []),
@@ -276,16 +276,31 @@ function splitText(series: OriginSeries[], key: "engagement" | "impressions", la
 }
 
 const SERIES_KEY = { direct: "seriesDirect", buffer: "seriesBuffer", unsplit: "seriesUnsplit" } as const;
+const ORIGIN_ORDER = ["direct", "buffer", "unsplit"] as const;
+
+/**
+ * A series' colour, fixed by its channel and origin: the shared channels in
+ * Buffer's order, each with Direct, Buffer and Not split, take the host
+ * palette in turn. The place counts every channel and origin whether or
+ * not it has a line, so a line keeps its colour on both charts and on
+ * every range when another line is left out.
+ */
+export function seriesColour(channelIds: string[], channelId: string, origin: OriginSeries["origin"]): string {
+	const at = channelIds.indexOf(channelId);
+	return chartColour((at < 0 ? channelIds.length : at) * ORIGIN_ORDER.length + ORIGIN_ORDER.indexOf(origin));
+}
 
 /**
  * One line per channel and origin, "Facebook (Direct)", in the host's own
  * palette, over every day Buffer's figures can cover. A day with no value
  * is a gap, not a zero. A line with no figure Buffer reported for the
  * chart's metric is left out, so a network that does not report
- * impressions draws no line of zeros. Past `CHART_VALUES`, each chart keeps
- * its busiest lines and the page says so.
+ * impressions draws no line of zeros, and so is a line with no value on
+ * the days drawn. Each line's colour comes from `seriesColour`, so a
+ * channel and origin look the same on both charts. Past `CHART_VALUES`,
+ * each chart keeps its busiest lines and the page says so.
  */
-function figureCharts(series: OriginSeries[], days: Day[], limitedTo: number | null, lang: Lang): { block: PageBlock; capped: { shown: number; total: number } | null } {
+function figureCharts(series: OriginSeries[], channelIds: string[], days: Day[], limitedTo: number | null, lang: Lang): { block: PageBlock; capped: { shown: number; total: number } | null } {
 	const labels = days.map((d) => formatShortDay(d, lang));
 	const maxLines = Math.max(1, Math.floor((CHART_VALUES - days.length) / Math.max(1, days.length)));
 	let capped: { shown: number; total: number } | null = null;
@@ -294,15 +309,21 @@ function figureCharts(series: OriginSeries[], days: Day[], limitedTo: number | n
 			.filter((s) => s.days.some((d) => reported(d, key)))
 			.map((s) => {
 				const byDay = new Map(s.days.map((d) => [d.day, d[key]]));
-				return { name: t(lang, SERIES_KEY[s.origin], { network: s.name }), data: days.map((d) => byDay.get(d) ?? null), size: reportedTotal(s.days, key) ?? 0 };
-			});
+				return {
+					name: t(lang, SERIES_KEY[s.origin], { network: s.name }),
+					data: days.map((d) => byDay.get(d) ?? null),
+					colour: seriesColour(channelIds, s.channelId, s.origin),
+					size: reportedTotal(s.days, key) ?? 0,
+				};
+			})
+			.filter((line) => line.data.some((v) => typeof v === "number"));
 		if (lines.length > maxLines) {
 			const keep = new Set([...lines].sort((a, b) => b.size - a.size).slice(0, maxLines));
 			capped = { shown: maxLines, total: Math.max(lines.length, capped?.total ?? 0) };
 			lines = lines.filter((line) => keep.has(line));
 		}
 		return lines.length > 0
-			? dailyChart({ labels, series: lines.map(({ name, data }) => ({ name, data })), style: "line", height: 220, gradient: true, yAxisName, blockId })
+			? dailyChart({ labels, series: lines.map(({ name, data, colour }) => ({ name, data, colour })), style: "line", height: 220, gradient: true, yAxisName, blockId })
 			: context(t(lang, "noFigures"));
 	};
 	const block = columns([

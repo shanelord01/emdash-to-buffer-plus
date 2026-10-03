@@ -7,9 +7,8 @@
  * with a named reason, so nothing is dropped without a trace.
  *
  * Bridge calls: at most one `content.getPublicUrl` (none when the SEO
- * canonical is set, or the editor left out every channel) and at most one
- * `media.get` (none when no channel sends an image, or the image needs no
- * lookup).
+ * canonical is set, or the editor left out every channel). The image needs
+ * none: its public address comes from the entry (`./image.ts`).
  *
  * A channel the editor left out for this entry in the editor panel gets a
  * `skipped` record with the reason `editorSkipped`, and its custom text
@@ -125,7 +124,7 @@ export async function prepareDeliveries(
 	});
 	let image: ImageResult = { ok: false, reason: "none" };
 	if (url && wantsImage) {
-		image = await resolveImage(ctx, imageSourceOf(collection), { data: entry.data, seo: entry.seo }, ctx.site.url);
+		image = resolveImage(imageSourceOf(collection), { data: entry.data, seo: entry.seo }, ctx.site.url);
 	}
 
 	const stamp = now.toISOString();

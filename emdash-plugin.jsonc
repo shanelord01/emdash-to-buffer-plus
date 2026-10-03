@@ -36,8 +36,10 @@
 	// `schema:read`: `ctx.schema.listCollections()` on the Buffer Plus page, to
 	// offer routable collections and their image fields.
 	//
-	// `media:read`: `ctx.media.get()` to turn a local image into its public
-	// URL.
+	// `media:read`: unused since 0.1.4. `ctx.media.get()` gives an address
+	// that needs signing in, so images now come from the entry's own value
+	// (src/publish/image.ts). Kept for this release so the update asks for
+	// no new approval. It goes in a later one.
 	//
 	// Deliberately absent: `content:write` (the plugin never edits entries),
 	// `network:request:unrestricted`, `users:read`, `email:send`.

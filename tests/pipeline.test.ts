@@ -25,6 +25,8 @@ import {
 	tick,
 	watching,
 } from "./host.js";
+import { RETRY_ALL_ACTION } from "../src/ui/analytics.js";
+import { PAGE_PATH } from "../src/ui/page.js";
 
 let host: PluginRuntimeTestHost | undefined;
 
@@ -165,19 +167,19 @@ describe("publishing an entry", () => {
 		expect(text).toContain("https://www.example.com/blog/hello?utm_source=newsletter&utm_medium=social&utm_campaign=linkedin");
 	});
 
-	it("sends the local cover image through the media library, with its alt text", async () => {
+	it("sends the local cover image at the site's public media address, with its alt text", async () => {
 		host = await setup([channel("c1", "linkedin")]);
 		await seedConfig(host, { channels: allOn([channel("c1", "linkedin")]), collections: { posts: { enabled: true, image: "cover" } } });
-		const media = await host.fixtures.media({ filename: "cover.jpg", mimeType: "image/jpeg", bytes: new Uint8Array([1, 2, 3]), alt: "A road" });
-		const { event } = await publishedPost(host, { cover: { id: media.id, provider: "local" } });
+		// The value EmDash stores for a local image: the media id is not the storage key.
+		const { event } = await publishedPost(host, {
+			cover: { id: "01M3QY3W07VYPSCAA3J1EHX3V8", provider: "local", filename: "gunbarrel-highway.jpg", mimeType: "image/jpeg", alt: "A road", meta: { storageKey: "01M3QY3VKJAWMFNS7TH6JHSA8W.jpg" } },
+		});
 		await respond(host, created("p1"));
 
 		await host.transport.invokeHook("content:afterPublish", event);
 
 		const input = sentBodies(host)[0]!.variables.input as { assets: Array<{ image: { url: string; metadata?: { altText: string } } }> };
-		expect(input.assets).toEqual([
-			{ image: { url: `https://www.example.com/_emdash/api/media/asset/${media.id}/cover.jpg`, metadata: { altText: "A road" } } },
-		]);
+		expect(input.assets).toEqual([{ image: { url: "https://www.example.com/_emdash/api/media/file/01M3QY3VKJAWMFNS7TH6JHSA8W.jpg", metadata: { altText: "A road" } } }]);
 	});
 
 	it("records channels it cannot use as skipped, with a reason", async () => {
@@ -373,5 +375,82 @@ describe("the shared bucket when publishing", () => {
 		await tick(host, "deliver-a")();
 		expect(host.http.requests()).toHaveLength(0);
 		expect((await deliveries(host))[0]).toMatchObject({ status: "unknown" });
+	});
+});
+
+describe("records from 0.1.3 with an image address that needs signing in", () => {
+	const KEY = "01M3QY3VKJAWMFNS7TH6JHSA8W.jpg";
+	const ASSET = "https://www.example.com/_emdash/api/media/asset/01M3QY3W07VYPSCAA3J1EHX3V8/gunbarrel-highway.jpg";
+	const cover = { id: "01M3QY3W07VYPSCAA3J1EHX3V8", provider: "local", filename: "gunbarrel-highway.jpg", mimeType: "image/jpeg", alt: "The Gunbarrel", meta: { storageKey: KEY } };
+	const three = [channel("fb", "facebook"), channel("ig", "instagram"), channel("th", "threads")];
+
+	/** The three deliveries Buffer refused on fueloracle.com.au: "Invalid post: Image could not be read from its URL." */
+	async function refused(runtime: PluginRuntimeTestHost, entryId: string) {
+		for (const c of three) {
+			await seedDelivery(runtime, `posts:${entryId}:${c.id}`, {
+				entryId,
+				channelId: c.id,
+				service: c.service,
+				attach: "image",
+				status: "failed",
+				attempts: 1,
+				error: "Invalid post: Image could not be read from its URL.",
+				errorKind: "refused",
+				imageUrl: ASSET,
+				imageAlt: "The Gunbarrel",
+			});
+		}
+	}
+
+	async function retryAndRun(runtime: PluginRuntimeTestHost) {
+		await runtime.admin.act(PAGE_PATH, RETRY_ALL_ACTION);
+		// One read and one send fit a run beside its reserve; each run sends one.
+		for (const task of ["deliver-a", "deliver-b", "deliver-a"]) await tick(runtime, task)();
+	}
+
+	const imagesSent = (runtime: PluginRuntimeTestHost) =>
+		sentBodies(runtime).map((b) => (b.variables.input as { assets?: Array<{ image: { url: string } }> }).assets?.[0]?.image.url ?? null);
+
+	it("Retry works the image out again from the entry and sends the public address", async () => {
+		host = await setup(three);
+		await seedConfig(host, { channels: allOn(three), collections: { posts: { enabled: true, image: "cover" } } });
+		const { id } = await publishedPost(host, { cover });
+		await refused(host, id);
+		await respond(host, created("p1"), created("p2"), created("p3"));
+
+		await retryAndRun(host);
+
+		expect(imagesSent(host)).toEqual(Array(3).fill(`https://www.example.com/_emdash/api/media/file/${KEY}`));
+		const rows = await deliveries(host);
+		expect(rows.map((r) => r.status)).toEqual(["sent", "sent", "sent"]);
+		expect(rows.every((r) => !r.imageUrl?.includes("/media/asset/"))).toBe(true);
+	});
+
+	it("with no public address, a network that needs an image is skipped and the others go without it, saying why", async () => {
+		host = await setup(three);
+		await seedConfig(host, { channels: allOn(three), collections: { posts: { enabled: true, image: "cover" } } });
+		const { id } = await publishedPost(host, { cover: { id: cover.id, provider: "local", alt: "x" } });
+		await refused(host, id);
+		await respond(host, created("p1"), created("p2"));
+
+		await retryAndRun(host);
+
+		expect(imagesSent(host)).toEqual([null, null]);
+		const byChannel = Object.fromEntries((await deliveries(host)).map((r) => [r.channelId, r]));
+		expect(byChannel.ig).toMatchObject({ status: "skipped", reason: "needsImage", imageIssue: "noPublicAddress" });
+		expect(byChannel.fb).toMatchObject({ status: "sent", imageIssue: "noPublicAddress" });
+		expect(byChannel.th).toMatchObject({ status: "sent", imageIssue: "noPublicAddress" });
+		expect(byChannel.fb!.imageUrl).toBeUndefined();
+	});
+
+	it("an entry that cannot be read sends without the image and records that", async () => {
+		host = await setup([three[0]!]);
+		await seedDelivery(host, "posts:gone:fb", { entryId: "gone", channelId: "fb", service: "facebook", attach: "image", imageUrl: ASSET });
+		await respond(host, created("p1"));
+
+		await tick(host, "deliver-a")();
+
+		expect(imagesSent(host)).toEqual([null]);
+		expect((await deliveries(host))[0]).toMatchObject({ status: "sent", imageIssue: "entryUnreadable" });
 	});
 });

@@ -91,6 +91,11 @@ never in the runtime bundle). A plain `pnpm install` is enough.
 - **An AbortSignal does not cross the sandbox bridge.** The wrapper
   marshals only method, headers, redirect and body. The client races each
   request against a timer instead (8 s).
+- **Never send `ctx.media.get()`'s URL anywhere public.** It is
+  `/_emdash/api/media/asset/<id>/<filename>`, which needs signing in and
+  answers 401 to Buffer. Images go out at `/_emdash/api/media/file/<storageKey>`,
+  worked out from the entry's own value (`src/publish/image.ts`), and
+  `publicImageUrl` refuses the asset path.
 - **The per-service table is documented fact only.** `src/buffer/services.ts`
   cites developers.buffer.com for every rule. Buffer's `configuration`
   query is Experimental and is used only as a hint that refines the table
@@ -236,7 +241,14 @@ pnpm registry:login     # once per machine
 pnpm registry:publish   # builds, bundles and publishes to the EmDash registry
 ```
 
-5. Follow the registry's checks with
+5. If the manifest description, keywords or sections changed, run
+   `pnpm exec emdash-plugin update-package` (a dry run that prints the
+   diff), then `pnpm exec emdash-plugin update-package --yes`. `publish`
+   writes the package profile only on the first release, so the registry
+   description and tabs otherwise stay as they were. The aggregator shows
+   the new profile once its checks pass; confirm with
+   `pnpm exec emdash-plugin info shane.bsky.shas.am emdash-to-buffer-plus`.
+6. Follow the registry's checks with
    `pnpm exec emdash-plugin info shane.bsky.shas.am emdash-to-buffer-plus --version <v>`
    (add `--watch` to wait). Checks can take from minutes to hours, and the
    listing can 404 for about 15 minutes after publishing.

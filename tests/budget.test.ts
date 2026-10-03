@@ -66,14 +66,17 @@ afterEach(async () => {
 
 const FIVE = ["a", "b", "c", "d", "e"].map((id) => channel(id, "linkedin"));
 
-/** Five channels sharing the cover image, so a publish needs the public URL, a media lookup and more sends than fit. */
+/** A local image as EmDash stores it: the public address comes from the storage key, with no lookup. */
+const COVER = { id: "01M3QY3W07VYPSCAA3J1EHX3V8", provider: "local", filename: "c.jpg", mimeType: "image/jpeg", alt: "x", meta: { storageKey: "01M3QY3VKJAWMFNS7TH6JHSA8W.jpg" } };
+const ASSET = "https://www.example.com/_emdash/api/media/asset/01M3QY3W07VYPSCAA3J1EHX3V8/c.jpg";
+
+/** Five channels sharing the cover image, so a publish needs the public URL and more sends than fit. */
 async function publishSetup(runtime: PluginRuntimeTestHost) {
 	await postsCollection(runtime);
 	await seedChannels(runtime, FIVE);
 	await seedConfig(runtime, { channels: allOn(FIVE), collections: { posts: { enabled: true, image: "cover" } } });
 	await seedState(runtime, watching);
-	const media = await runtime.fixtures.media({ filename: "c.jpg", mimeType: "image/jpeg", bytes: new Uint8Array([1]), alt: "x" });
-	return await publishedPost(runtime, { cover: { id: media.id, provider: "local" } });
+	return await publishedPost(runtime, { cover: COVER });
 }
 
 describe("lifecycle hooks", () => {
@@ -94,7 +97,7 @@ describe("lifecycle hooks", () => {
 });
 
 describe("content hooks", () => {
-	it("a publish to more channels than fit, with a public URL and media lookup", async () => {
+	it("a publish to more channels than fit, with a public URL and an image", async () => {
 		host = await newHost();
 		const { event } = await publishSetup(host);
 		for (const id of ["p1", "p2", "p3", "p4", "p5"]) await respond(host, created(id));
@@ -103,8 +106,10 @@ describe("content hooks", () => {
 
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect(calls).toContain("contentPublicUrl");
-		expect(calls).toContain("mediaGet");
+		// The image's address comes from the entry: no media lookup, and never the signed-in route.
+		expect(calls).not.toContain("mediaGet");
 		const rows = await deliveries(host);
+		expect(rows.every((r) => r.imageUrl === "https://www.example.com/_emdash/api/media/file/01M3QY3VKJAWMFNS7TH6JHSA8W.jpg")).toBe(true);
 		expect(rows.filter((r) => r.status === "sent").length).toBeGreaterThanOrEqual(1);
 		expect(rows.filter((r) => r.status === "pending").length).toBeGreaterThanOrEqual(1);
 		expect(calls).toContain("cronSchedule");
@@ -128,8 +133,7 @@ describe("content hooks", () => {
 		await seedChannels(host, two);
 		await seedConfig(host, { channels: allOn(two), collections: { posts: { enabled: true, image: "cover" } } });
 		await seedState(host, watching);
-		const media = await host.fixtures.media({ filename: "c.jpg", mimeType: "image/jpeg", bytes: new Uint8Array([1]) });
-		const { event } = await publishedPost(host, { cover: { id: media.id } });
+		const { event } = await publishedPost(host, { cover: COVER });
 		await respond(host, created("p1"), created("p2"));
 
 		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterPublish", event));
@@ -201,6 +205,27 @@ describe("cron tasks", () => {
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect(calls).toContain("storageUpdateIf");
 		expect((await deliveries(host)).some((r) => r.status === "sent")).toBe(true);
+		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("deliver-b");
+	});
+
+	it("a continuation over records from 0.1.3 with an image address that needs signing in: one entry read, then the send", async () => {
+		host = await newHost();
+		await postsCollection(host);
+		await seedConfig(host, { collections: { posts: { enabled: true, image: "cover" } } });
+		const { id } = await publishedPost(host, { cover: COVER });
+		for (const c of ["a", "b", "c"]) {
+			await seedDelivery(host, `posts:${id}:${c}`, { entryId: id, channelId: c, service: "facebook", attach: "image", imageUrl: ASSET });
+		}
+		await respond(host, created("p1"), created("p2"), created("p3"));
+
+		const calls = await bridgeCalls(tick(host, "deliver-a"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls.filter((c) => c === "contentGet")).toHaveLength(1);
+		expect(calls).toContain("storageUpdateIf");
+		const rows = await deliveries(host);
+		expect(rows.filter((r) => r.status === "sent")).toHaveLength(1);
+		expect(rows.find((r) => r.status === "sent")?.imageUrl).toBe("https://www.example.com/_emdash/api/media/file/01M3QY3VKJAWMFNS7TH6JHSA8W.jpg");
 		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("deliver-b");
 	});
 
@@ -681,6 +706,21 @@ describe("the editor panel", () => {
 		expect(calls).toContain("cronSchedule");
 	});
 
+	it("Send again of a record from 0.1.3 with an image address that needs signing in, which reads the entry first", async () => {
+		host = await newHost();
+		await postsCollection(host);
+		await seedChannels(host, TWO);
+		await seedConfig(host, { channels: allOn(TWO), collections: { posts: { enabled: true, image: "cover" } } });
+		await seedState(host, watching);
+		const { id } = await publishedPost(host, { cover: COVER });
+		await seedDelivery(host, `posts:${id}:a`, { entryId: id, channelId: "a", status: "sent", postId: "p1", postStatus: "sent", attach: "image", imageUrl: ASSET });
+		await respond(host, created("p2"));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:a` }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("contentGet");
+		expect((await deliveries(host)).find((d) => d.postId === "p2")?.imageUrl).toBe("https://www.example.com/_emdash/api/media/file/01M3QY3VKJAWMFNS7TH6JHSA8W.jpg");
+	});
+
 	it("Send again, answered", async () => {
 		host = await newHost();
 		const id = await panelSetup(host, { sent: true });
@@ -697,10 +737,9 @@ describe("Share now on an entry from before the watch", () => {
 		await seedChannels(runtime, channels);
 		await seedConfig(runtime, { channels: allOn(channels), collections: { posts: { enabled: true, image: "cover" } } });
 		await seedState(runtime, { watchSince: NOW.toISOString() });
-		const media = await runtime.fixtures.media({ filename: "c.jpg", mimeType: "image/jpeg", bytes: new Uint8Array([1]), alt: "x" });
 		const item = await runtime.fixtures.content("posts", {
 			slug: "old",
-			data: { title: "Old post", excerpt: "A short excerpt.", cover: { id: media.id, provider: "local" } },
+			data: { title: "Old post", excerpt: "A short excerpt.", cover: COVER },
 			status: "published",
 			publishedAt: new Date(NOW.getTime() - 6 * HOUR).toISOString(),
 		});
@@ -738,7 +777,8 @@ describe("Share now on an entry from before the watch", () => {
 		for (const p of ["p1", "p2", "p3", "p4", "p5"]) await respond(host, created(p));
 		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_CONFIRM_ACTION));
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
-		expect(calls).toEqual(expect.arrayContaining(["contentGet", "contentPublicUrl", "mediaGet", "storagePutMany", "cronSchedule"]));
+		expect(calls).toEqual(expect.arrayContaining(["contentGet", "contentPublicUrl", "storagePutMany", "cronSchedule"]));
+		expect(calls).not.toContain("mediaGet");
 		const rows = await deliveries(host);
 		expect(rows).toHaveLength(5);
 		expect(rows.every((r) => r.origin === "manual")).toBe(true);
