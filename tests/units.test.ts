@@ -1,4 +1,3 @@
-import type { PluginContext } from "emdash/plugin";
 import { describe, expect, it } from "vitest";
 
 import { engagementOf, engagementRateOf, impressionsOf, metricMap } from "../src/buffer/metrics.js";
@@ -94,35 +93,52 @@ describe("image URLs Buffer may be given", () => {
 });
 
 describe("resolving the entry's image", () => {
-	const media = (item: unknown) => ({ media: { get: async () => item } }) as unknown as Pick<PluginContext, "media">;
-	const local = { id: "m1", filename: "a.jpg", mimeType: "image/jpeg", size: 1, url: "/_emdash/api/media/asset/m1/a.jpg", createdAt: "", alt: "Alt" };
+	const field = { kind: "field", field: "cover" } as const;
+	const KEY = "01M3QY3VKJAWMFNS7TH6JHSA8W.jpg";
+	const cover = { id: "01M3QY3W07VYPSCAA3J1EHX3V8", provider: "local", filename: "gunbarrel-highway.jpg", mimeType: "image/jpeg", alt: "Alt", meta: { storageKey: KEY } };
 
-	it("a local image field through the media library", async () => {
-		expect(await resolveImage(media(local), { kind: "field", field: "cover" }, { data: { cover: { id: "m1" } } }, SITE)).toEqual({
-			ok: true,
-			url: `${SITE}/_emdash/api/media/asset/m1/a.jpg`,
-			alt: "Alt",
-		});
+	it("a local image field at the public file route, from its storage key, never its id", () => {
+		expect(resolveImage(field, { data: { cover } }, SITE)).toEqual({ ok: true, url: `${SITE}/_emdash/api/media/file/${KEY}`, alt: "Alt" });
 	});
 
-	it("a bare string in an image field is looked up as an id, never used as a URL", async () => {
-		const missing = await resolveImage(media(null), { kind: "field", field: "cover" }, { data: { cover: "https://evil.example.net/x.jpg" } }, SITE);
-		expect(missing).toEqual({ ok: false, reason: "notFound" });
+	it("a local value's public src comes first, and a src that needs signing in is never used", () => {
+		expect(resolveImage(field, { data: { cover: { ...cover, src: "/_emdash/api/media/file/other.jpg" } } }, SITE)).toMatchObject({ url: `${SITE}/_emdash/api/media/file/other.jpg` });
+		expect(resolveImage(field, { data: { cover: { ...cover, src: `/_emdash/api/media/asset/${cover.id}/a.jpg` } } }, SITE)).toMatchObject({ url: `${SITE}/_emdash/api/media/file/${KEY}` });
 	});
 
-	it("a provider's absolute https src", async () => {
-		const result = await resolveImage(media(null), { kind: "field", field: "cover" }, { data: { cover: { id: "u1", provider: "unsplash", src: "https://images.unsplash.com/p.jpg", alt: "Hill" } } }, SITE);
+	it("a storage key is encoded segment by segment, and one that climbs out of the route is refused", () => {
+		expect(resolveImage(field, { data: { cover: { ...cover, meta: { storageKey: "plugin-test/a b.jpg" } } } }, SITE)).toMatchObject({ url: `${SITE}/_emdash/api/media/file/plugin-test/a%20b.jpg` });
+		expect(resolveImage(field, { data: { cover: { ...cover, meta: { storageKey: "../asset/x" } } } }, SITE)).toEqual({ ok: false, reason: "noPublicAddress" });
+	});
+
+	it("a local value without a storage key falls back to the SEO image, keeping the field's alt text, else names why", () => {
+		const bare = { id: cover.id, provider: "local", alt: "Alt" };
+		expect(resolveImage(field, { data: { cover: bare }, seo: { image: "/_emdash/api/media/file/seo.jpg" } }, SITE)).toEqual({ ok: true, url: `${SITE}/_emdash/api/media/file/seo.jpg`, alt: "Alt" });
+		expect(resolveImage(field, { data: { cover: bare } }, SITE)).toEqual({ ok: false, reason: "noPublicAddress" });
+	});
+
+	it("a bare string in an image field is never looked up or sent elsewhere", () => {
+		expect(resolveImage(field, { data: { cover: "https://evil.example.net/x.jpg" } }, SITE)).toEqual({ ok: false, reason: "noPublicAddress" });
+	});
+
+	it("a provider's absolute https src", () => {
+		const result = resolveImage(field, { data: { cover: { id: "u1", provider: "unsplash", src: "https://images.unsplash.com/p.jpg", alt: "Hill" } } }, SITE);
 		expect(result).toEqual({ ok: true, url: "https://images.unsplash.com/p.jpg", alt: "Hill" });
 	});
 
-	it("the SEO image as a path, an absolute URL on the site, or a media id", async () => {
-		expect(await resolveImage(media(null), { kind: "seo" }, { data: {}, seo: { image: "/_emdash/api/media/file/k.jpg" } }, SITE)).toMatchObject({ ok: true, url: `${SITE}/_emdash/api/media/file/k.jpg` });
-		expect(await resolveImage(media(null), { kind: "seo" }, { data: {}, seo: { image: "https://elsewhere.example.net/k.jpg" } }, SITE)).toEqual({ ok: false, reason: "notPublic" });
-		expect(await resolveImage(media(local), { kind: "seo" }, { data: {}, seo: { image: "m1" } }, SITE)).toMatchObject({ ok: true });
+	it("the SEO image resolved as EmDash resolves og:image: a site path, an absolute URL on the site, or a bare key", () => {
+		const seo = (image: string) => resolveImage({ kind: "seo" }, { data: {}, seo: { image } }, SITE);
+		expect(seo("/_emdash/api/media/file/k.jpg")).toMatchObject({ ok: true, url: `${SITE}/_emdash/api/media/file/k.jpg` });
+		expect(seo(`${SITE}/_emdash/api/media/file/k.jpg`)).toMatchObject({ ok: true, url: `${SITE}/_emdash/api/media/file/k.jpg` });
+		expect(seo(KEY)).toMatchObject({ ok: true, url: `${SITE}/_emdash/api/media/file/${KEY}` });
+		expect(seo("https://elsewhere.example.net/k.jpg")).toEqual({ ok: false, reason: "notPublic" });
 	});
 
-	it("a media item that is not an image is not sent", async () => {
-		expect(await resolveImage(media({ ...local, mimeType: "application/pdf" }), { kind: "field", field: "cover" }, { data: { cover: { id: "m1" } } }, SITE)).toEqual({ ok: false, reason: "notFound" });
+	it("never an address under the signed-in media route, however it is written", () => {
+		for (const path of ["/_emdash/api/media/asset/m1/a.jpg", "/_emdash/api/media/file/../asset/m1/a.jpg", "/_emdash/api/media/%61sset/m1/a.jpg", "/_EMDASH/api/media/asset/m1/a.jpg"]) {
+			expect(publicImageUrl(`${SITE}${path}`, SITE), path).toBeNull();
+			expect(resolveImage({ kind: "seo" }, { data: {}, seo: { image: path } }, SITE), path).toEqual({ ok: false, reason: "notPublic" });
+		}
 	});
 });
 

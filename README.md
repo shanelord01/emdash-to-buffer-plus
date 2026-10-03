@@ -17,6 +17,17 @@ report what you find in the repository's issues.
 
 ## What's new
 
+**0.1.4, 3 October 2026**
+- Images now use the site's public media address. 0.1.3 and earlier sent
+  an address that needs signing in, so Buffer could not read the image.
+  Retry on a delivery that failed this way works the image out again from
+  the entry and sends it.
+- Each channel keeps the same colour on the engagement and impressions
+  charts, whichever lines a chart leaves out, and a line with nothing to
+  draw no longer takes a colour.
+- No new permissions and no MCP tool output changes, so Agent access
+  stays on after the update.
+
 **0.1.3, 3 October 2026**
 - The engagement and impressions charts cover every day of the range. A
   day with no posts counts as 0, so one post on one day is a single peak
@@ -104,8 +115,9 @@ report what you find in the repository's issues.
 
 The plugin asks for four permissions: read content (to know when an entry
 is published and find its link), read the schema (to list your
-collections and their image fields), read media (to turn an image into
-its public address) and make network requests to `api.buffer.com` only.
+collections and their image fields), read media (no longer used since
+0.1.4, and to be dropped in a later release) and make network requests to
+`api.buffer.com` only.
 
 ## Create the Buffer key
 
@@ -210,7 +222,11 @@ path.
 
 The image comes from the source chosen for the collection. Buffer has no
 upload: it fetches the image from its address when the post goes out,
-which can be days later. So an image is sent only when its address is
+which can be days later. A local image is sent at the site's public media
+address, `/_emdash/api/media/file/<storage key>`, the one your pages use.
+The media library's own address needs signing in and is never sent. When
+an image field has no public address, the SEO image is used instead. An
+image is sent only when its address is
 `https` and on your site's own host, or an absolute `https` address from
 an external media provider. Addresses that are IP numbers, `localhost` or
 private names are refused. Alt text goes with the image when the entry

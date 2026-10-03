@@ -207,10 +207,29 @@ export function columns(cols: PageBlock[][], opts?: { blockId?: string }): Colum
 export interface DailySeries {
 	name: string;
 	data: Array<number | null>;
+	/** A fixed colour ("#4290F0"), so a series keeps it on every chart. Without one, ECharts picks by position. */
+	colour?: string;
 }
 
-/** The host palette's first colour, the same in light and dark mode (kumo ChartPalette.categorical(0)). */
-const FIRST_COLOUR = { r: 66, g: 144, b: 240 };
+/**
+ * The host's categorical chart palette in light mode, in kumo's order
+ * (@cloudflare/kumo 2.6.0, ChartPalette.categorical and CHART_LIGHT_COLORS:
+ * Blue, Yellow, Pink, Purple, Teal, Orange). Kumo's dark palette differs
+ * only in Yellow (#EEB720), and a colour set in the options replaces the
+ * host's palette in both modes.
+ */
+export const CHART_COLOURS = ["#4290F0", "#F5B647", "#E8649D", "#8D58EE", "#50C3B6", "#D37536"] as const;
+
+/** The palette colour at a position, wrapping round as kumo's ChartPalette.categorical does. */
+export function chartColour(index: number): string {
+	return CHART_COLOURS[((index % CHART_COLOURS.length) + CHART_COLOURS.length) % CHART_COLOURS.length]!;
+}
+
+/** "rgba(66, 144, 240, 0.4)" from "#4290F0". */
+function rgba(hex: string, alpha: number): string {
+	const n = Number.parseInt(hex.slice(1), 16);
+	return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
 
 /**
  * A chart of one value per day, drawn as `chart_type: "custom"` with a
@@ -229,6 +248,12 @@ const FIRST_COLOUR = { r: 66, g: 144, b: 240 };
  * and series are told apart in the tooltip, as on the timeseries chart.
  * Everything else copies kumo's timeseries options (axes, dashed split
  * lines, grid, a gradient under a single line, bars stacked).
+ *
+ * A series with no value on any day is left out: it would draw nothing,
+ * yet take a palette colour and a row of "-" in the tooltip. A series
+ * with a `colour` carries it in `itemStyle` (points, bars and the tooltip
+ * marker) and `lineStyle`. The host strips only `formatter`, `rich`,
+ * `graphic` and `axisPointer` from custom options.
  */
 export function dailyChart(opts: {
 	labels: string[];
@@ -239,13 +264,14 @@ export function dailyChart(opts: {
 	gradient?: boolean;
 	blockId?: string;
 }): ChartBlock {
-	const { r, g, b } = FIRST_COLOUR;
-	const gradient = opts.gradient && opts.style === "line" && opts.series.length === 1;
-	const series = opts.series.map((s) => ({
+	const drawn = opts.series.filter((s) => s.data.some((v) => typeof v === "number"));
+	const gradient = opts.gradient && opts.style === "line" && drawn.length === 1;
+	const series = drawn.map((s) => ({
 		type: opts.style,
 		name: s.name,
 		data: s.data,
 		emphasis: { focus: "series" },
+		...(s.colour !== undefined && { itemStyle: { color: s.colour }, ...(opts.style === "line" && { lineStyle: { color: s.colour } }) }),
 		...(opts.style === "bar"
 			? { stack: "total" }
 			: {
@@ -264,8 +290,9 @@ export function dailyChart(opts: {
 					x2: 0,
 					y2: 1,
 					colorStops: [
-						{ offset: 0, color: `rgba(${r}, ${g}, ${b}, 0.4)` },
-						{ offset: 1, color: `rgba(${r}, ${g}, ${b}, 0)` },
+						// Without a colour of its own, the only line is the palette's first.
+						{ offset: 0, color: rgba(s.colour ?? chartColour(0), 0.4) },
+						{ offset: 1, color: rgba(s.colour ?? chartColour(0), 0) },
 					],
 				},
 			},

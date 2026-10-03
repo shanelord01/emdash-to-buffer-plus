@@ -19,18 +19,12 @@ import { emptyConfig, type ChannelCache, type ChannelConfig, type PluginConfig }
 
 const SITE = "https://www.example.com";
 const NOW = new Date("2026-10-03T00:00:00.000Z");
-const IMAGE_URL = `${SITE}/_emdash/api/media/asset/m1/cover.jpg`;
+const IMAGE_URL = `${SITE}/_emdash/api/media/file/k1.jpg`;
 
 function fakeCtx(opts: { publicUrl?: string | null; image?: boolean } = {}): PluginContext {
 	return {
 		site: { url: SITE, name: "Site", locale: "en" },
 		content: { getPublicUrl: async () => (opts.publicUrl === undefined ? `${SITE}/blog/hello` : opts.publicUrl) },
-		media: {
-			get: async () =>
-				opts.image === false
-					? null
-					: { id: "m1", filename: "cover.jpg", mimeType: "image/jpeg", size: 3, url: "/_emdash/api/media/asset/m1/cover.jpg", createdAt: "", alt: "A road" },
-		},
 	} as unknown as PluginContext;
 }
 
@@ -41,7 +35,7 @@ function entry(excerpt = "A short excerpt."): EntryRef {
 		status: "published",
 		publishedAt: NOW.toISOString(),
 		slug: "hello",
-		data: { title: "Hello world", excerpt, cover: { id: "m1", provider: "local" } },
+		data: { title: "Hello world", excerpt, cover: { id: "m1", provider: "local", alt: "A road", meta: { storageKey: "k1.jpg" } } },
 	};
 }
 
@@ -242,12 +236,11 @@ describe("every skip reason", () => {
 		});
 	}
 
-	it("the editor's choice wins over a channel problem, and needs no link or image lookup", async () => {
+	it("the editor's choice wins over a channel problem, and needs no link lookup", async () => {
 		let lookups = 0;
 		const ctx = {
 			site: { url: SITE },
 			content: { getPublicUrl: async () => (lookups++, `${SITE}/blog/hello`) },
-			media: { get: async () => (lookups++, null) },
 		} as unknown as PluginContext;
 		const channel = chan("instagram", { isLocked: true });
 		const config: PluginConfig = { ...emptyConfig(), channels: { [channel.id]: { enabled: true, mode: "addToQueue", attach: "image" } }, collections: {} };

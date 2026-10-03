@@ -8,17 +8,27 @@
  * must be the site's own host, except for an image from a non-local media
  * provider, whose absolute https `src` is allowed on the provider's host.
  *
+ * The address is EmDash's public file route,
+ * `/_emdash/api/media/file/<storageKey>` (emdash 1.1
+ * src/astro/routes/api/media/file/[...key].ts, which serves without
+ * signing in). Never `/_emdash/api/media/asset/<id>/<filename>`, the `url`
+ * that `ctx.media.get()` gives: that route asks for `media:read` and answers
+ * 401 to Buffer.
+ *
  * Where the image comes from (emdash src/media/types.ts `MediaValue`,
- * src/seo/media-url.ts):
- * - an image field holds `{ provider?, id, src?, alt? }`. Local media is
- *   looked up with `ctx.media.get(id)`, whose `url` is a site-relative
- *   `/_emdash/api/media/asset/<id>/<filename>`; other providers carry an
- *   absolute `src`.
- * - the SEO image is a string: an absolute URL, a site path, or a bare media
- *   id. A bare id is looked up as media, never used as a URL.
+ * src/media/local-runtime.ts `getEmbed`, src/seo/media-url.ts):
+ * - an image field holds `{ id, src, alt, provider, meta: { storageKey } }`
+ *   (docs.emdashcms.com/reference/field-types/#image), `src` being
+ *   `/_emdash/api/media/file/<key>` for local media. A local value with
+ *   neither a public `src` nor a storage key has no address the plugin can
+ *   be sure of, so the SEO image stands in for it, else there is no image.
+ *   Other providers carry an absolute https `src`.
+ * - the SEO image is a string, resolved as EmDash resolves `og:image`
+ *   (`buildSeoImageUrl`): an absolute URL as it is, a site path joined to
+ *   the site's URL, and a bare reference under the public file route.
+ *
+ * No bridge call: everything is in the entry.
  */
-
-import type { PluginContext } from "emdash/plugin";
 
 import { isRecord, str } from "../values.js";
 
@@ -26,29 +36,27 @@ export type ImageSource = { kind: "field"; field: string } | { kind: "seo" } | {
 
 export type ImageResult =
 	| { ok: true; url: string; alt: string }
-	| { ok: false; reason: "none" | "notPublic" | "notFound" | "lookupFailed" };
+	/** `noPublicAddress`: a local image whose storage key the entry does not carry, and no SEO image to stand in. */
+	| { ok: false; reason: "none" | "notPublic" | "noPublicAddress" };
 
-export async function resolveImage(
-	ctx: Pick<PluginContext, "media">,
-	source: ImageSource,
-	content: { data: Record<string, unknown>; seo?: unknown },
-	siteUrl: string,
-): Promise<ImageResult> {
+/** EmDash's public media route, and the signed-in one Buffer cannot read. */
+export const MEDIA_FILE_PATH = "/_emdash/api/media/file/";
+export const MEDIA_ASSET_PATH = "/_emdash/api/media/asset/";
+
+export function resolveImage(source: ImageSource, content: { data: Record<string, unknown>; seo?: unknown }, siteUrl: string): ImageResult {
 	if (source.kind === "none") return { ok: false, reason: "none" };
-
-	if (source.kind === "seo") {
-		const seo = isRecord(content.seo) ? content.seo : {};
-		const ref = str(seo.image);
-		if (!ref) return { ok: false, reason: "none" };
-		if (/^https?:\/\//i.test(ref) || ref.startsWith("//")) return checked(ref.startsWith("//") ? `https:${ref}` : ref, siteUrl, "");
-		if (ref.startsWith("/")) return checked(join(siteUrl, ref), siteUrl, "");
-		return await fromMedia(ctx, ref, siteUrl, "");
-	}
+	if (source.kind === "seo") return seoImage(content.seo, siteUrl);
 
 	const value = content.data[source.field];
 	if (typeof value === "string") {
-		// A bare string in an image field is a media id at most, never a URL.
-		return value.trim() ? await fromMedia(ctx, value.trim(), siteUrl, "") : { ok: false, reason: "none" };
+		// A bare string in an image field: an address at most, never looked up.
+		const ref = value.trim();
+		if (!ref) return { ok: false, reason: "none" };
+		if (/^https:\/\//i.test(ref) || ref.startsWith(MEDIA_FILE_PATH)) {
+			const result = checked(ref.startsWith("/") ? join(siteUrl, ref) : ref, siteUrl, "");
+			if (result.ok) return result;
+		}
+		return standIn(content.seo, siteUrl, "");
 	}
 	if (!isRecord(value)) return { ok: false, reason: "none" };
 	const alt = str(value.alt);
@@ -58,24 +66,59 @@ export async function resolveImage(
 		if (!src) return { ok: false, reason: "none" };
 		return checked(src, siteUrl, alt, { providerSrc: true });
 	}
-	const id = str(value.id);
-	if (id) return await fromMedia(ctx, id, siteUrl, alt);
-	if (src.startsWith("/")) return checked(join(siteUrl, src), siteUrl, alt);
-	return src ? checked(src, siteUrl, alt) : { ok: false, reason: "none" };
+	// The order EmDash itself follows. A local `src` under the public file
+	// route is canonical (emdash src/loader.ts normalizeLocalMediaValue,
+	// LOCAL_MEDIA_FILE_PREFIX), as is an absolute https one on the site's
+	// host. Else the route plus `meta.storageKey` (src/components/EmDashMedia.astro,
+	// src/media/local-runtime.ts getEmbed). Never the id as a key: a media
+	// id is not its storage key, and that path would not exist.
+	if (src.startsWith(MEDIA_FILE_PATH) || /^https:\/\//i.test(src)) {
+		const fromSrc = checked(src.startsWith("/") ? join(siteUrl, src) : src, siteUrl, alt);
+		if (fromSrc.ok) return fromSrc;
+	}
+	const meta = isRecord(value.meta) ? value.meta : {};
+	const key = str(meta.storageKey) || str(value.storageKey);
+	if (key) {
+		const path = filePath(key);
+		if (path) return checked(join(siteUrl, path), siteUrl, alt);
+	}
+	return standIn(content.seo, siteUrl, alt);
 }
 
-async function fromMedia(ctx: Pick<PluginContext, "media">, id: string, siteUrl: string, alt: string): Promise<ImageResult> {
-	if (!ctx.media) return { ok: false, reason: "lookupFailed" };
-	let item: Awaited<ReturnType<NonNullable<PluginContext["media"]>["get"]>>;
+/** The SEO image in place of a local image with no address, keeping the field's alt text. */
+function standIn(seo: unknown, siteUrl: string, alt: string): ImageResult {
+	const result = seoImage(seo, siteUrl);
+	if (result.ok) return { ...result, alt: alt || result.alt };
+	return { ok: false, reason: "noPublicAddress" };
+}
+
+function seoImage(seo: unknown, siteUrl: string): ImageResult {
+	const ref = str(isRecord(seo) ? seo.image : undefined);
+	if (!ref) return { ok: false, reason: "none" };
+	if (/^https?:\/\//i.test(ref)) return checked(ref, siteUrl, "");
+	if (ref.startsWith("//")) return checked(`https:${ref}`, siteUrl, "");
+	if (ref.startsWith("/")) return checked(join(siteUrl, ref), siteUrl, "");
+	const path = filePath(ref);
+	return path ? checked(join(siteUrl, path), siteUrl, "") : { ok: false, reason: "notPublic" };
+}
+
+/**
+ * The public route for a storage key, each segment percent-encoded, or null
+ * for a key that could climb out of it ("..", empty segments).
+ */
+export function filePath(key: string): string | null {
+	const segments = key.split("/");
+	if (segments.some((s) => s === "" || s === "." || s === "..")) return null;
+	return MEDIA_FILE_PATH + segments.map(encodeURIComponent).join("/");
+}
+
+/** Whether a URL points at EmDash's signed-in media route, which Buffer cannot read. */
+export function isSignedInMediaUrl(raw: string): boolean {
 	try {
-		item = await ctx.media.get(id);
+		return decodeURIComponent(new URL(raw, "https://site.invalid").pathname).toLowerCase().startsWith(MEDIA_ASSET_PATH);
 	} catch {
-		return { ok: false, reason: "lookupFailed" };
+		return true;
 	}
-	if (!item) return { ok: false, reason: "notFound" };
-	if (!item.mimeType.startsWith("image/")) return { ok: false, reason: "notFound" };
-	const url = item.url.startsWith("/") ? join(siteUrl, item.url) : item.url;
-	return checked(url, siteUrl, alt || str(item.alt));
 }
 
 function join(siteUrl: string, path: string): string {
@@ -98,6 +141,8 @@ export function publicImageUrl(raw: string, siteUrl: string, opts?: { providerSr
 		return null;
 	}
 	if (url.protocol !== "https:") return null;
+	// EmDash's signed-in media route answers 401 to Buffer, on any host.
+	if (isSignedInMediaUrl(url.toString())) return null;
 	if (url.username || url.password) return null;
 	const host = url.hostname.toLowerCase();
 	if (!isPublicHostname(host)) return null;

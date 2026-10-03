@@ -25,13 +25,14 @@ import type { PluginContext } from "emdash/plugin";
 import { BufferClient, type BufferResult, type CreatedPost, type CreatePostInput, type BufferPost } from "../buffer/client.js";
 import { currentWindows, publishDecision } from "../buffer/headroom.js";
 import type { RateLimitSnapshot } from "../buffer/ratelimit.js";
-import { postShape } from "../buffer/services.js";
+import { postShape, ruleFor } from "../buffer/services.js";
 import { readSettings, type PluginSettings } from "../settings.js";
 import { DELIVERIES, deliveryId, isDue, OPEN_STATUSES, UNKNOWN_GIVE_UP_MS, type Delivery } from "../store/deliveries.js";
 import { readStored, STATE_KEY, storedReadings, type PluginState, type Stored } from "../store/kv.js";
 import { OVERRIDES, overrideId, parseOverride } from "../store/overrides.js";
 import { metered, type Meter } from "./budget.js";
-import { entryFromEvent, prepareDeliveries, type EntryRef } from "./prepare.js";
+import { isSignedInMediaUrl, resolveImage } from "./image.js";
+import { entryFromEvent, imageSourceOf, prepareDeliveries, type EntryRef } from "./prepare.js";
 
 /**
  * Two names for the one-shot continuation, alternated. EmDash deletes a
@@ -80,6 +81,54 @@ export function createInput(row: Delivery): CreatePostInput {
 		assets: shape.assets,
 		...(shape.metadata && { metadata: shape.metadata }),
 	};
+}
+
+/** An entry as `ctx.content.get()` returns it, or null when it could not be read. */
+type EntryItem = Awaited<ReturnType<NonNullable<PluginContext["content"]>["get"]>>;
+
+/**
+ * Whether a record carries an image address that needs signing in: 0.1.3
+ * and earlier stored `ctx.media.get()`'s `/_emdash/api/media/asset/` URL,
+ * which Buffer cannot read ("Image could not be read from its URL").
+ */
+export function needsImageRepair(row: Delivery): boolean {
+	return Boolean(row.imageUrl) && isSignedInMediaUrl(row.imageUrl!);
+}
+
+/**
+ * A record from 0.1.3 or earlier with its image worked out again from the
+ * entry, by the rules a new record follows (`./image.ts`). One bridge call
+ * (`content.get`) per entry not in `entries` yet. The caller keeps the map
+ * for the other records of the same entry. When there is no public address,
+ * or the entry cannot be read, the record goes without the image and says
+ * why in `imageIssue`, and a network that needs an image is skipped as a new
+ * record would be (`needsImage`).
+ */
+export async function repairImage(ctx: PluginContext, stored: Stored, row: Delivery, entries: Map<string, EntryItem>): Promise<Delivery> {
+	const key = `${row.collection}:${row.entryId}`;
+	if (!entries.has(key)) {
+		let item: EntryItem = null;
+		try {
+			item = ctx.content ? await ctx.content.get(row.collection, row.entryId) : null;
+		} catch {
+			item = null;
+		}
+		entries.set(key, item);
+	}
+	const item = entries.get(key) ?? null;
+	const image = item ? resolveImage(imageSourceOf(stored.config.collections[row.collection]), { data: item.data, seo: item.seo }, ctx.site.url) : null;
+	const rule = ruleFor(row.service, row.hints);
+	const out: Delivery = { ...row };
+	delete out.imageUrl;
+	delete out.imageAlt;
+	delete out.imageIssue;
+	if (image?.ok && rule.image !== "never") return { ...out, imageUrl: image.url, imageAlt: image.alt };
+	if (rule.image === "needed") {
+		delete out.error;
+		delete out.errorKind;
+		return { ...out, status: "skipped", reason: "needsImage", nextAttemptAt: "", imageIssue: item ? "noPublicAddress" : "entryUnreadable" };
+	}
+	return { ...out, imageIssue: item ? "noPublicAddress" : "entryUnreadable" };
 }
 
 /** A record after Buffer answered a create. */
@@ -157,8 +206,8 @@ export type PublishOutcome =
 
 /**
  * The content hooks. Bridge calls, worst case: settings, KV, the existing
- * record lookup, the editor's override, public URL, media (6); the records
- * written as claims (7); then one createPost per send while two calls stay
+ * record lookup, the editor's override, public URL (5); the records
+ * written as claims (6); then one createPost per send while two calls stay
  * in reserve for the results and the continuation (see `sendPrepared`).
  */
 export async function onPublished(rawCtx: PluginContext, event: unknown, now = new Date()): Promise<PublishOutcome> {
@@ -286,7 +335,7 @@ export async function sendPrepared(
  * entry is shared. The caller has checked that the entry is published,
  * older than the watch and has no records yet.
  *
- * Bridge calls: the public URL and the media lookup (2 at most), then
+ * Bridge calls: the public URL (1 at most), then
  * `sendPrepared`'s claim, sends, results and continuation from what is left.
  */
 export async function shareNow(
@@ -319,8 +368,10 @@ export interface RunOutcome {
 
 /**
  * One delivery run. Bridge calls: settings, KV, the open records (3); per
- * unknown record a lookup; per send a claim and a createPost; then the
- * results, the next continuation and the state (3 in reserve).
+ * unknown record a lookup; per entry whose records carry a 0.1.3 image
+ * address, a read of the entry (`repairImage`); per send a claim and a
+ * createPost; then the results, the next continuation and the state (3 in
+ * reserve).
  *
  * `rawCtx` may already be metered by the caller (the recurring sync spends
  * calls on pruning first); pass its meter so the budget is shared.
@@ -346,6 +397,7 @@ export async function runDeliveries(
 
 	const RESERVE = 3;
 	const updates = new Map<string, Delivery>();
+	const entries = new Map<string, EntryItem>();
 	let rateLimit: RateLimitSnapshot | undefined;
 	// A spent window stops the run before any request: sends and look-ups both count.
 	let waitUntil: number | undefined = spentUntil(stored, now);
@@ -399,9 +451,19 @@ export async function runDeliveries(
 			if (waitUntil !== undefined) break;
 		}
 
-		if (meter.left() < RESERVE + 2) {
+		// An image address from 0.1.3 or earlier is worked out again before the send: one read per entry.
+		const repair = needsImageRepair(current);
+		const reads = repair && !entries.has(`${current.collection}:${current.entryId}`) ? 1 : 0;
+		if (meter.left() < RESERVE + 2 + reads) {
 			if (current !== row.data) updates.set(row.id, current);
 			break;
+		}
+		if (repair) {
+			current = await repairImage(ctx, stored, current, entries);
+			if (current.status === "skipped") {
+				updates.set(row.id, { ...current, updatedAt: stamp });
+				continue;
+			}
 		}
 		// The claim is atomic: two runs that read the same record cannot both
 		// send it. `updatedAt` is indexed and changes on every write.

@@ -48,13 +48,15 @@
  * - Share now, first press (the question) and Cancel: KV, settings, the
  *   entry's deliveries, the entry, its override (5);
  * - Share now, confirmed: KV, settings, the entry's deliveries, the entry,
- *   its override (5), the public URL and media lookup (7), then the claim
+ *   its override (5), the public URL (6), then the claim
  *   and as many sends as fit with the results, or a continuation (10);
  * - a load after: KV, settings, the entry's deliveries (3);
  * - Retry: those three, the record, the continuation (5);
  * - Send again, first press: those three (3);
  * - Send again, confirmed: those three, the claim, the post, the result,
- *   and a continuation or the rate-limit reading when Buffer answers so (7).
+ *   and a continuation or the rate-limit reading when Buffer answers so (7),
+ *   and one more to read the entry when the record carries an image
+ *   address from 0.1.3 or earlier, which needs signing in (8).
  */
 
 import type { PluginContext, SandboxedRouteContext } from "emdash/plugin";
@@ -62,7 +64,7 @@ import type { PluginContext, SandboxedRouteContext } from "emdash/plugin";
 import { channelBlocker, textLimit } from "../buffer/services.js";
 import { langOf, reasonText, t, type Lang } from "../i18n.js";
 import { metered } from "../publish/budget.js";
-import { againRecord, retryOne, sendPrepared, shareNow } from "../publish/pipeline.js";
+import { againRecord, needsImageRepair, repairImage, retryOne, sendPrepared, shareNow } from "../publish/pipeline.js";
 import type { EntryRef } from "../publish/prepare.js";
 import { readSettings, type PluginSettings } from "../settings.js";
 import { DELIVERIES, POST_NOT_FOUND, type Delivery } from "../store/deliveries.js";
@@ -274,11 +276,14 @@ async function sendAgain(
 	const refusal = againRefusal(records, target, lang);
 	if (refusal || !target) return { message: refusal ?? t(lang, "panelAgainNothing"), type: "error" };
 	const row = againRecord(target, now);
+	// An image address from 0.1.3 or earlier needs signing in: worked out again from the entry first.
+	if (needsImageRepair(row.data)) row.data = await repairImage(ctx, stored, row.data, new Map());
 	records.push(row);
 	await sendPrepared(ctx, meter, settings, stored, [row], now);
 	const result = row.data;
 	if (result.status === "sent") return { message: t(lang, "panelAgainSent"), type: "success" };
 	if (result.status === "failed") return { message: t(lang, "panelAgainFailed", { message: result.error ?? "" }), type: "error" };
+	if (result.status === "skipped") return { message: reasonText(lang, result.reason ?? "needsImage"), type: "error" };
 	return { message: t(lang, "panelAgainQueued"), type: "success" };
 }
 

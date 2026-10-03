@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Aggregates, AggregateDay, Origins, ReportState } from "../src/store/report.js";
 import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION } from "../src/ui/analytics.js";
+import { CHART_COLOURS, dailyChart } from "../src/ui/blocks.js";
 import { formatShortDay } from "../src/ui/format.js";
 import { PAGE_PATH } from "../src/ui/page.js";
 import { SETUP_ACTION } from "../src/ui/analytics.js";
@@ -421,7 +422,9 @@ describe("figures by origin", () => {
 
 describe("charts over the whole range", () => {
 	const chartOf = (response: unknown, blockId: string) => {
-		let found: { labels: string[]; series: Array<{ name: string; data: Array<number | null> }>; tooltip?: unknown; xType?: string } | undefined;
+		let found:
+			| { labels: string[]; series: Array<{ name: string; data: Array<number | null>; itemStyle?: { color: string }; lineStyle?: { color: string }; areaStyle?: any }>; tooltip?: unknown; xType?: string }
+			| undefined;
 		const walk = (node: unknown): void => {
 			if (Array.isArray(node)) return node.forEach(walk);
 			if (!node || typeof node !== "object") return;
@@ -565,6 +568,66 @@ describe("charts over the whole range", () => {
 		// Days the aggregates have not read stay missing; a day Buffer counted one post, the listed one, is 0.
 		expect(line(engagement, "Facebook (Direct)")).toEqual([null, null, null, 0, 5, 4, null]);
 		expect(line(engagement, "Facebook (Buffer)")).toEqual([0, 0, 0, 0, 4, 0, 0]);
+	});
+
+	it("leaves out a series with no value on any day, so it takes no colour and no tooltip row", () => {
+		const chart = dailyChart({
+			labels: ["1 Oct", "2 Oct", "3 Oct"],
+			series: [
+				{ name: "Threads (Not split)", data: [null, null, null] },
+				{ name: "Facebook (Direct)", data: [0, 2, null] },
+			],
+			style: "line",
+			height: 220,
+			gradient: true,
+		});
+		const series = (chart.config as unknown as { options: { series: Array<{ name: string; areaStyle?: unknown }> } }).options.series;
+		expect(series.map((s) => s.name)).toEqual(["Facebook (Direct)"]);
+		// The one line left is the only line, so it keeps the gradient under it.
+		expect(series[0]!.areaStyle).toBeDefined();
+	});
+
+	it("a channel and origin keep one colour on both charts and every range, whatever other lines are left out", async () => {
+		const TH = channel("c5", "threads", { displayName: "FuelOracle Threads" });
+		host = await newHost();
+		await seedSplit(
+			host,
+			{ days: { c2: { [dayAgo(1)]: { direct: { posts: 1, engagement: 3, impressions: 30 } } } }, coveredFrom: { c2: dayAgo(6) } },
+			{
+				channels: [TH, FBX],
+				methods: { c2: "listed" },
+				// Threads is not split and reports no impressions; its one figure is 13 days old.
+				aggregates: { c5: { [dayAgo(13)]: { posts: 1, metrics: { reactions: 1 }, metricsUpdatedAt: NOW.toISOString() } } },
+			},
+		);
+
+		const month = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 30 });
+		const week = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 7 });
+
+		expectValid(month);
+		expectValid(week);
+		const colour = (chart: ReturnType<typeof chartOf>, name: string) => {
+			const s = chart.series.find((x) => x.name === name)!;
+			expect(s.lineStyle?.color).toBe(s.itemStyle?.color);
+			return s.itemStyle!.color;
+		};
+		const engagement = chartOf(month, "buffer:chart:engagement");
+		const impressions = chartOf(month, "buffer:chart:impressions");
+		expect(engagement.series.map((s) => s.name)).toEqual(["Threads (Not split)", "Facebook (Direct)"]);
+		// Threads reports no impressions: no line there, and Facebook keeps its colour rather than taking the first.
+		expect(impressions.series.map((s) => s.name)).toEqual(["Facebook (Direct)"]);
+		const facebook = colour(engagement, "Facebook (Direct)");
+		expect(CHART_COLOURS).toContain(facebook);
+		expect(colour(impressions, "Facebook (Direct)")).toBe(facebook);
+		expect(colour(engagement, "Threads (Not split)")).not.toBe(facebook);
+		// The gradient under the single line is in that line's colour.
+		const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(facebook.slice(i, i + 2), 16));
+		expect(impressions.series[0]!.areaStyle.color.colorStops[0].color).toBe(`rgba(${r}, ${g}, ${b}, 0.4)`);
+		// Over seven days Threads has no figure and no line; Facebook's colour stays.
+		const weekEngagement = chartOf(week, "buffer:chart:engagement");
+		expect(weekEngagement.series.map((s) => s.name)).toEqual(["Facebook (Direct)"]);
+		expect(colour(weekEngagement, "Facebook (Direct)")).toBe(facebook);
+		expect(colour(chartOf(week, "buffer:chart:impressions"), "Facebook (Direct)")).toBe(facebook);
 	});
 
 	it("ten channels split two ways over 90 days stay inside Block Kit's node limit, keeping each chart's busiest lines", async () => {
