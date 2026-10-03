@@ -40,7 +40,7 @@ import {
 	type Aggregates,
 	type Day,
 } from "../store/report.js";
-import { noteFailure, type PhaseContext } from "./common.js";
+import { backfillHeadroom, headroom, noteFailure, observe, type PhaseContext } from "./common.js";
 
 /** Aliases per request (api-limits.md: at most 30). */
 export const ALIASES_PER_REQUEST = 30;
@@ -80,8 +80,12 @@ function dayWindow(organizationId: string, channelId: string, day: Day): Aggrega
 	return { organizationId, channelId, start: `${day}T00:00:00Z`, end: `${day}T23:59:59Z`, key: day };
 }
 
-/** The windows still to read today, in the order they are read. */
-export function plan(agg: Aggregates, targets: Array<{ id: string; organizationId: string }>, today: Day): Planned[] {
+/**
+ * The windows still to read today, in the order they are read. Without
+ * `withBackfill`, days older than the last 30 are left for a later run: the
+ * backfill runs only while Buffer's 24-hour window is at least half full.
+ */
+export function plan(agg: Aggregates, targets: Array<{ id: string; organizationId: string }>, today: Day, withBackfill = true): Planned[] {
 	const floor = addDays(today, -(REPORT_DAYS - 1));
 	const recentFloor = addDays(today, -(RECENT_DAYS - 1));
 	const recent: Planned[] = [];
@@ -94,7 +98,7 @@ export function plan(agg: Aggregates, targets: Array<{ id: string; organizationI
 				recent.push({ kind: "recent", window: dayWindow(t.organizationId, t.id, day) });
 			}
 		}
-		if (prog.backTo) {
+		if (withBackfill && prog.backTo) {
 			for (let day = addDays(prog.backTo, -1); daysBetween(floor, day) >= 0; day = addDays(day, -1)) {
 				backfill.push({ kind: "backfill", window: dayWindow(t.organizationId, t.id, day) });
 			}
@@ -137,9 +141,12 @@ export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promi
 	let failed = false;
 	const ranges = new Set<string>();
 	for (let round = 0; round < rounds; round++) {
-		const batch = plan(agg, targets, today).slice(0, ALIASES_PER_REQUEST);
+		const batch = plan(agg, targets, today, backfillHeadroom(p)).slice(0, ALIASES_PER_REQUEST);
 		if (batch.length === 0) break;
+		// Shared bucket: checked before every request, with the reading the last one brought back.
+		if (!headroom(p)) break;
 		const result = await client.aggregates(batch.map((b) => b.window));
+		observe(p, result.rateLimit);
 		if (!result.ok) {
 			noteFailure(p, result);
 			failed = true;
@@ -153,7 +160,7 @@ export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promi
 	prune(agg, new Set((p.stored.channels?.channels ?? []).map((c) => c.id)), today);
 	if (JSON.stringify(agg) !== before) await p.ctx.storage[REPORTS]!.put(AGGREGATES_ID, agg);
 
-	const remaining = plan(agg, targets, today).length;
+	const remaining = plan(agg, targets, today, backfillHeadroom(p)).length;
 	p.report.aggregates = failed
 		? { ...p.report.aggregates, failedAt: stamp }
 		: { at: stamp, ...(remaining === 0 ? { done: today } : { pending: true }) };

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION, SETUP_ACTION } from "../src/ui/analytics.js";
 import { CHANNEL_ACTION_PREFIX, COLLECTIONS_ACTION, DISCOVER_ACTION, PAGE_PATH, RETRY_ACTION, UTM_ACTION } from "../src/ui/page.js";
 import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
-import { PANEL_AGAIN_ACTION, PANEL_ID, PANEL_RETRY_ACTION, PANEL_SAVE_ACTION } from "../src/ui/panel.js";
+import { PANEL_AGAIN_ACTION, PANEL_ID, PANEL_RETRY_ACTION, PANEL_SAVE_ACTION, PANEL_SHARE_ACTION } from "../src/ui/panel.js";
 import { TOOL_ROUTES } from "../src/tools/load.js";
 import { bridgeCalls } from "./bridge-calls.js";
 import {
@@ -19,6 +19,7 @@ import {
 	postsCollection,
 	publishedPost,
 	rateLimited,
+	reading,
 	respond,
 	seedChannels,
 	seedConfig,
@@ -82,6 +83,11 @@ describe("lifecycle hooks", () => {
 			expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 			expect(await host.inspect.kv.get("state")).toMatchObject({ watchSince: expect.any(String) });
 			expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("sync");
+			// Staggered: the default half-hourly sync is never on :00 and :30.
+			const state = await host.inspect.kv.get<{ syncOffset: number }>("state");
+			expect(state?.syncOffset).toEqual(expect.any(Number));
+			const sync = (await host.inspect.scheduledTasks()).find((t) => t.name === "sync");
+			expect(sync?.schedule).toMatch(/^([1-9]|[12]\d),([3-5]\d) \* \* \* \*$/);
 		});
 	}
 });
@@ -558,6 +564,83 @@ describe("the editor panel", () => {
 		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:a` }));
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect((await deliveries(host)).filter((d) => d.postId === "p2")).toHaveLength(1);
+	});
+});
+
+describe("Share now on an entry from before the watch", () => {
+	async function oldEntry(runtime: PluginRuntimeTestHost, channels: typeof FIVE) {
+		await postsCollection(runtime);
+		await seedChannels(runtime, channels);
+		await seedConfig(runtime, { channels: allOn(channels), collections: { posts: { enabled: true, image: "cover" } } });
+		await seedState(runtime, { watchSince: NOW.toISOString() });
+		const media = await runtime.fixtures.media({ filename: "c.jpg", mimeType: "image/jpeg", bytes: new Uint8Array([1]), alt: "x" });
+		const item = await runtime.fixtures.content("posts", {
+			slug: "old",
+			data: { title: "Old post", excerpt: "A short excerpt.", cover: { id: media.id, provider: "local" } },
+			status: "published",
+			publishedAt: new Date(NOW.getTime() - 6 * HOUR).toISOString(),
+		});
+		return item.id;
+	}
+
+	it("the panel load, which reads the entry", async () => {
+		host = await newHost();
+		const id = await oldEntry(host, FIVE);
+		const calls = await bridgeCalls(() => host!.admin.loadEditorPanel(PANEL_ID, "posts", id));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("contentGet");
+	});
+
+	it("five channels with an image: the claim, then a continuation for those that do not fit", async () => {
+		host = await newHost();
+		const id = await oldEntry(host, FIVE);
+		for (const p of ["p1", "p2", "p3", "p4", "p5"]) await respond(host, created(p));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toEqual(expect.arrayContaining(["contentGet", "contentPublicUrl", "mediaGet", "storagePutMany", "cronSchedule"]));
+		const rows = await deliveries(host);
+		expect(rows).toHaveLength(5);
+		expect(rows.every((r) => r.origin === "manual")).toBe(true);
+		expect(rows.filter((r) => r.status === "pending").length).toBeGreaterThanOrEqual(1);
+	});
+
+	it("one channel with an image, sent in the press", async () => {
+		host = await newHost();
+		const id = await oldEntry(host, FIVE.slice(0, 1));
+		await respond(host, created("p1"));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect((await deliveries(host))[0]).toMatchObject({ status: "sent", postId: "p1" });
+	});
+});
+
+describe("the shared-bucket guard and the stagger", () => {
+	it("a sync paused for headroom, with deliveries due", async () => {
+		host = await newHost();
+		await seedChannels(host, [channel("c1", "linkedin")]);
+		await seedConfig(host, { channels: allOn([channel("c1", "linkedin")]) });
+		await seedReport(host, { ...nothingDue(), status: undefined, metrics: undefined, aggregates: undefined, channelsAt: undefined });
+		await seedState(host, { ...watching, rateLimit: reading(10, 200, 2000) });
+		await openRecords(host, 3);
+		for (let i = 0; i < 3; i++) await respond(host, json({ data: { posts: { edges: [] } } }), created(`p${i}`));
+		const calls = await bridgeCalls(tick(host, "sync"));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("httpFetch");
+		expect(await host.inspect.kv.get("report")).toMatchObject({ headroom: { window: 900 } });
+	});
+
+	it("a page load on an install from before the stagger, which picks its offset and moves the sync", async () => {
+		host = await newHost();
+		await seedChannels(host, FIVE);
+		await seedConfig(host, { channels: allOn(FIVE) });
+		await seedState(host, watching);
+		await host.transport.invokeHook("plugin:activate", {});
+		await seedState(host, watching);
+		const calls = await bridgeCalls(() => host!.admin.loadPage(PAGE_PATH));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toEqual(expect.arrayContaining(["kvSet", "cronSchedule"]));
+		const sync = (await host.inspect.scheduledTasks()).find((t) => t.name === "sync");
+		expect(sync?.schedule).not.toBe("*/30 * * * *");
 	});
 });
 

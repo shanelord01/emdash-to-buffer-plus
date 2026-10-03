@@ -54,6 +54,15 @@ function graphemes(text: string): number {
 	return n;
 }
 
+describe("the manifest description", () => {
+	// The registry refuses one over 140 graphemes; `emdash-plugin validate` does not check it.
+	it("is at most 140 graphemes", () => {
+		const text = manifest().description;
+		expect(typeof text).toBe("string");
+		expect(graphemes(text as string)).toBeLessThanOrEqual(140);
+	});
+});
+
 describe("the registry page's sections", () => {
 	const sections = manifest().sections as Record<string, { file: string }>;
 

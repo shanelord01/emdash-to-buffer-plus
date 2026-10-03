@@ -1,4 +1,4 @@
-You need EmDash 1.1.0 or later with a sandbox runner, a Buffer account with your channels connected, and `EMDASH_ENCRYPTION_KEY` set on the site so the API key can be saved encrypted (`npx emdash secrets generate` makes one).
+You need EmDash 1.1.0 or later with a sandbox runner, a Buffer account with your channels connected, room in your Buffer account's API limit (shared by every key and connected assistant: 250 requests a day and 3,000 in 30 days on the Free plan, the plugin uses about 40 to 50 a day for 10 channels), and `EMDASH_ENCRYPTION_KEY` set on the site so the API key can be saved encrypted (`npx emdash secrets generate` makes one).
 
 1. Install the plugin from the Registry and review its permissions: read content, read the schema, read media, and network requests to `api.buffer.com` only.
 2. In Buffer, open Settings > API (`https://publish.buffer.com/settings/api`) and create a personal API key.

@@ -10,6 +10,7 @@
  */
 
 import type { BufferChannel } from "../buffer/client.js";
+import { backgroundDecision } from "../buffer/headroom.js";
 import { channelBlocker } from "../buffer/services.js";
 import { reasonText, t, type Lang } from "../i18n.js";
 import {
@@ -28,10 +29,10 @@ import {
 	total,
 } from "../report/figures.js";
 import type { PluginSettings } from "../settings.js";
-import { channelConfig, hintsFor, limitFor, type Stored } from "../store/kv.js";
+import { channelConfig, hintsFor, limitFor, storedReadings, type Stored } from "../store/kv.js";
 import { daysBetween, RANGES, type Aggregates, type Ledger, type RangeDays } from "../store/report.js";
 import { actions, banner, button, columns, context, empty, header, link, stats, table, timeseries, type PageBlock, type StatItem } from "./blocks.js";
-import { comparisonText, formatAge, formatCount, formatDay, formatRate, trendOf } from "./format.js";
+import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatTime, trendOf } from "./format.js";
 
 export const RANGE_ACTION = "buffer:range";
 export const PAGE_REFRESH_ACTION = "buffer:refresh";
@@ -114,7 +115,10 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	out.push(stats(items, { blockId: "buffer:stats" }));
 
 	const sends = sendsByDay(ledger, current, watch);
-	if (sends.length > 0) {
+	// A chart of nothing draws an empty 0 to 1 axis: say so instead.
+	if (!sends.some((d) => d.sent > 0 || d.failed > 0)) {
+		out.push(empty({ title: t(lang, "chartNothingTitle"), description: t(lang, "chartNothingText"), blockId: "buffer:chart:sent" }));
+	} else {
 		out.push(
 			timeseries(
 				[
@@ -209,7 +213,8 @@ function countStat(label: string, current: number, previous: number | null, lang
 
 /** A Buffer figure: missing when Buffer reported nothing, never zero. */
 function figureStat(label: string, current: number | undefined, previous: number | undefined | null, reaches: boolean, missing: string, lang: Lang): StatItem {
-	if (current === undefined) return { label, value: t(lang, "noFigures"), description: missing };
+	// The big value stays short ("None yet"); the description says why.
+	if (current === undefined) return { label, value: t(lang, "noneYet"), description: missing };
 	const prev = reaches ? (previous ?? null) : null;
 	const trend = trendOf(current, prev);
 	return { label, value: formatCount(current, lang), description: comparisonText(current, prev, lang), ...(trend && { trend }) };
@@ -293,6 +298,9 @@ function banners(input: AnalyticsInput, shared: BufferChannel[]): PageBlock[] {
 	const atLimit = names((c) => Boolean(limitFor(stored.channels, c.id)?.isAtLimit));
 	if (atLimit) out.push(banner({ description: t(lang, "bannerAtLimit", { names: atLimit }), variant: "alert" }));
 
+	const until = headroomPausedUntil(settings, stored, now);
+	if (until) out.push(banner({ description: t(lang, "headroomPaused", { time: formatTime(until, lang) }), variant: "alert", blockId: "buffer:headroom" }));
+
 	const report = stored.report;
 	if (report.pausedUntil && Date.parse(report.pausedUntil) > now.getTime()) {
 		out.push(banner({ description: t(lang, "bannerRateLimited", { time: formatAge(report.pausedUntil, now, lang) ?? report.pausedUntil }), variant: "alert" }));
@@ -300,6 +308,17 @@ function banners(input: AnalyticsInput, shared: BufferChannel[]): PageBlock[] {
 		out.push(banner({ description: t(lang, "bannerProblem", { message: report.problem.message }), variant: "alert" }));
 	}
 	return out;
+}
+
+/**
+ * When background reads are paused to leave Buffer requests for the
+ * account's other tools, the moment they resume; null while they run.
+ * Worked out from the stored readings now, so the notice goes the moment
+ * the window that ran low resets, without waiting for a sync.
+ */
+export function headroomPausedUntil(settings: PluginSettings, stored: Stored, now: Date): string | null {
+	const decision = backgroundDecision(storedReadings(stored, now), settings.headroomPercent);
+	return decision.allowed ? null : decision.until;
 }
 
 /** Channels the plugin cannot post to, each with Buffer's or the rule table's reason. */

@@ -16,7 +16,7 @@
 
 import type { StatusLookup } from "../buffer/client.js";
 import { DELIVERIES, OPEN_POST_STATUSES, POST_NOT_FOUND, type Delivery } from "../store/deliveries.js";
-import { noteFailure, type PhaseContext } from "./common.js";
+import { headroom, noteFailure, observe, type PhaseContext } from "./common.js";
 
 /** Records looked up per run: inside Buffer's 30 aliases per query. */
 export const STATUS_BATCH = 25;
@@ -73,7 +73,10 @@ export async function runStatusPhase(p: PhaseContext): Promise<void> {
 			},
 		];
 	});
+	// Shared bucket: stop here, the pass picks up where it is next time.
+	if (!headroom(p)) return;
 	const result = await client.postStatuses(lookups);
+	observe(p, result.rateLimit);
 	if (!result.ok) {
 		noteFailure(p, result);
 		return;

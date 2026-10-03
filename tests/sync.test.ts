@@ -6,16 +6,20 @@ import type { Aggregates, Ledger, ReportState } from "../src/store/report.js";
 import {
 	allOn,
 	channel,
+	created,
 	deliveries,
 	HOUR,
 	json,
+	limits,
 	newHost,
 	NOW,
 	rateLimited,
+	reading,
 	respond,
 	seedChannels,
 	seedConfig,
 	seedDelivery,
+	seedState,
 	sentBodies,
 	tick,
 } from "./host.js";
@@ -281,5 +285,78 @@ describe("the scan phase", () => {
 		// likes (inside reactions) and clicks are not engagement; impressions were not reported.
 		expect(ledger?.entries["posts:e2:c1"]).toMatchObject({ engagement: 4 });
 		expect(ledger?.entries["posts:e2:c1"]?.impressions).toBeUndefined();
+	});
+});
+
+describe("the shared-bucket guard", () => {
+	it("pauses the report reads while the day is below the reserve, without a failure, and still runs the delivery pass", async () => {
+		host = await setup({ ...nothingDue(), status: undefined, metrics: undefined, aggregates: undefined });
+		// 60 of 250 left today: under the 25% (63) kept for other tools.
+		await seedState(host, { watchSince: NOW.toISOString(), rateLimit: reading(90, 60, 2500) });
+		await seedDelivery(host, "posts:e1:c1", { status: "sent", postId: "p1", postStatus: "scheduled" });
+		await seedDelivery(host, "posts:e2:c1", { entryId: "e2", status: "pending" });
+		await respond(host, created("p2"));
+
+		await tick(host, "sync")();
+
+		// Only the post went out: no status, metrics or aggregates read.
+		expect(sentBodies(host)).toHaveLength(1);
+		expect(sentBodies(host)[0]!.query).toContain("createPost");
+		const state = await report(host);
+		expect(state.headroom).toMatchObject({ window: 86_400 });
+		expect(Date.parse(state.headroom!.until)).toBeGreaterThan(Date.now());
+		expect(state.problem).toBeUndefined();
+		// Paused work is not chased by catch-up runs.
+		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).not.toContain("catchup-a");
+	});
+
+	it("stops between requests when an answer brings the reading below the reserve, and keeps that reading", async () => {
+		host = await setup({ ...nothingDue(), metrics: undefined, aggregates: undefined });
+		await seedDelivery(host, "posts:e1:c1", { status: "sent", postId: "p1", postStatus: "sent" });
+		await respond(host, json({ data: { posts: { edges: [], pageInfo: { endCursor: null, hasNextPage: false } } } }, 200, limits(19, 200, 2000)));
+
+		await tick(host, "sync")();
+
+		expect(sentBodies(host).map(operation)).toEqual(["SentPostMetrics"]);
+		const state = await report(host);
+		expect(state.rateLimit?.windows.find((w) => w.window === 900)?.remaining).toBe(19);
+		expect(state.headroom).toMatchObject({ window: 900 });
+	});
+
+	it("clears the pause once the window that ran low has reset", async () => {
+		host = await setup(nothingDue());
+		const old = new Date(NOW.getTime() - 900_000);
+		await seedReport(host, { ...nothingDue(), rateLimit: reading(5, 200, 2000, old), headroom: { at: old.toISOString(), until: NOW.toISOString(), window: 900 } });
+		await tick(host, "sync")();
+		expect((await report(host)).headroom).toBeUndefined();
+	});
+
+	it("leaves the backfill for later while less than half the day is left, and reads the recent days", async () => {
+		host = await setup({ ...nothingDue(), aggregates: undefined });
+		await seedState(host, { watchSince: NOW.toISOString(), rateLimit: reading(90, 120, 2500) });
+		const recentDone: Aggregates = { days: {}, ranges: {}, progress: { c1: { recentOn: today, backTo: dayAgo(29) } }, rangesOn: today };
+		await host.fixtures.plugin.storage("reports", "aggregates", recentDone);
+
+		await tick(host, "catchup-a")();
+
+		// Only older days were left, and they wait: no request, and the phase is done for today.
+		expect(host.http.requests()).toHaveLength(0);
+		expect((await report(host)).aggregates).toMatchObject({ done: today });
+		expect((await report(host)).headroom).toBeUndefined();
+	});
+
+	it("stops a channel refresh part way and keeps the last snapshot", async () => {
+		host = await setup({ ...nothingDue(), channelsAt: undefined });
+		await seedChannels(host, [LI], { fetchedAt: new Date(NOW.getTime() - 25 * HOUR).toISOString() });
+		await respond(host, json({ data: { account: { organizations: [{ id: "org1", name: "Org" }] } } }, 200, limits(90, 40, 2000)));
+
+		await tick(host, "sync")();
+
+		expect(host.http.requests()).toHaveLength(1);
+		const state = await report(host);
+		expect(state.channelsAt).toBeUndefined();
+		expect(state.headroom).toMatchObject({ window: 86_400 });
+		expect(state.rateLimit?.windows.find((w) => w.window === 86_400)?.remaining).toBe(40);
+		expect((await host.inspect.kv.get<{ fetchedAt: string }>("channels"))?.fetchedAt).toBe(new Date(NOW.getTime() - 25 * HOUR).toISOString());
 	});
 });

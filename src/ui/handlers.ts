@@ -33,7 +33,7 @@ import { readSettings, type PluginSettings } from "../settings.js";
 import { CHANNEL_MODES, CONFIG_KEY, readStored, STATE_KEY, ATTACH_MODES, type ChannelConfig, type ChannelMode, type Stored } from "../store/kv.js";
 import type { RangeDays } from "../store/report.js";
 import { refreshChannels } from "../sync/channels.js";
-import { ensureScheduled, requestRefresh } from "../sync/sync.js";
+import { ensureScheduled, newSyncOffset, requestRefresh } from "../sync/sync.js";
 import { isRecord, str } from "../values.js";
 import type { AttachMode } from "../buffer/services.js";
 import {
@@ -79,17 +79,24 @@ export async function handleAdmin(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 
 	const settings = await readSettings(ctx);
 	const stored = await readStored(ctx);
-	if (!stored.state.watchSince) {
+	if (!stored.state.watchSince || stored.state.syncOffset === undefined) {
 		// The page is one of the places the plugin starts watching for new
-		// entries; plugin:install and plugin:activate are the others.
-		stored.state = { ...stored.state, watchSince: now.toISOString() };
+		// entries; plugin:install and plugin:activate are the others. The
+		// sync's offset is picked in the same write, so an install from
+		// before 0.1.1 moves off :00 and :30 on its next page load.
+		stored.state = {
+			...stored.state,
+			watchSince: stored.state.watchSince ?? now.toISOString(),
+			syncOffset: stored.state.syncOffset ?? newSyncOffset(),
+		};
 		await ctx.kv.set(STATE_KEY, stored.state);
 	}
+	const offset = stored.state.syncOffset ?? 0;
 
 	if (input.page === WIDGET_PAGE) {
 		let toast: Toast | undefined;
 		if (isAction && actionId === WIDGET_REFRESH_ACTION) toast = await refresh(ctx, lang, now);
-		else await ensureScheduled(ctx, settings.syncInterval);
+		else await ensureScheduled(ctx, settings.syncInterval, offset);
 		const { ledger, aggregates } = await loadSnapshots(ctx);
 		const blocks = renderWidget({ lang, settings, stored, ledger, aggregates, now });
 		return toast ? { blocks, toast } : { blocks };
@@ -107,7 +114,7 @@ export async function handleAdmin(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 	} else if (isAction && actionId === PAGE_REFRESH_ACTION) {
 		toast = await refresh(ctx, lang, now);
 	} else if (!isAction || (actionId !== RANGE_ACTION && actionId !== ANALYTICS_ACTION)) {
-		await ensureScheduled(ctx, settings.syncInterval);
+		await ensureScheduled(ctx, settings.syncInterval, offset);
 	}
 
 	const { ledger, aggregates } = await loadSnapshots(ctx);
@@ -180,7 +187,7 @@ async function setupPage(
 		toast = { message: t(lang, "saved"), type: "success" };
 	}
 
-	const blocks = renderSetup({ lang, settings, stored, collections, failed, canManage, range: opts.range });
+	const blocks = renderSetup({ lang, settings, stored, collections, failed, canManage, range: opts.range, now });
 	return toast ? { blocks, toast } : { blocks };
 }
 

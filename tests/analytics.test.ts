@@ -4,8 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Aggregates, AggregateDay } from "../src/store/report.js";
 import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION } from "../src/ui/analytics.js";
 import { PAGE_PATH } from "../src/ui/page.js";
+import { SETUP_ACTION } from "../src/ui/analytics.js";
 import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
-import { allOn, channel, deliveries, expectValid, HOUR, newHost, NOW, seedChannels, seedConfig, seedDelivery, seedState } from "./host.js";
+import { allOn, channel, deliveries, expectValid, HOUR, newHost, NOW, reading, seedChannels, seedConfig, seedDelivery, seedState } from "./host.js";
 import { DAY, dayAgo, entry, seedAggregates, seedLedger, today } from "./report-fixtures.js";
 
 let host: PluginRuntimeTestHost | undefined;
@@ -112,8 +113,10 @@ describe("the Analytics view", () => {
 
 		expectValid(response);
 		const stats = blocksOf(response).find((b) => b.type === "stats") as { items: Array<{ label: string; value: string }> };
-		expect(stats.items.find((i) => i.label.startsWith("Impressions"))?.value).toBe("No figures yet");
-		expect(stats.items.find((i) => i.label.startsWith("Engagement"))?.value).toBe("No figures yet");
+		// A short value the card can hold; the description says why.
+		expect(stats.items.find((i) => i.label.startsWith("Impressions"))?.value).toBe("None yet");
+		expect(stats.items.find((i) => i.label.startsWith("Engagement"))?.value).toBe("None yet");
+		expect(stats.items.some((i) => i.value === "0")).toBe(false);
 		expect(text(response)).not.toContain("buffer:chart:engagement");
 		expect(text(response)).not.toMatch(/"impressions":0\b/);
 	});
@@ -172,11 +175,12 @@ describe("the dashboard widget", () => {
 		expectValid(response);
 		const stats = blocksOf(response).find((b) => b.type === "stats") as { items: Array<{ label: string; value: string }> };
 		expect(Object.fromEntries(stats.items.map((i) => [i.label, i.value]))).toEqual({
-			"Sent, last 7 days": "2",
-			"Failed, last 7 days": "2",
-			"Engagement, last 7 days": "42",
-			"Queued now": "1",
+			Sent: "2",
+			Failed: "2",
+			Queued: "1",
 		});
+		// Engagement is a line of text, not a fourth card.
+		expect(text(response)).toContain("Engagement, last 7 days: 42.");
 		expect(text(response)).toContain("Next: Next one");
 		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("sync");
 	});
@@ -188,5 +192,56 @@ describe("the dashboard widget", () => {
 		expectValid(response);
 		expect(response.toast).toMatchObject({ type: "success" });
 		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("refresh");
+	});
+});
+
+describe("reports paused for the account's other tools", () => {
+	it("the Analytics view says so with the time they resume; the Setup view says so beside the requests left", async () => {
+		host = await newHost();
+		await seedAll(host);
+		await seedState(host, { watchSince: ago(100), rateLimit: reading(90, 50, 2500) });
+
+		const analytics = await host.admin.loadPage(PAGE_PATH);
+		expectValid(analytics);
+		const banner = blocksOf(analytics).find((b) => b.block_id === "buffer:headroom");
+		expect(banner).toMatchObject({ type: "banner", variant: "alert" });
+		expect(String(banner?.description)).toMatch(/^Reports paused to leave Buffer requests for your other tools until .+ UTC\. Posts still go out\.$/);
+
+		const setup = await host.admin.act(PAGE_PATH, SETUP_ACTION);
+		expectValid(setup);
+		expect(text(setup)).toContain("Reports paused to leave Buffer requests for your other tools");
+		expect(text(setup)).toContain("Buffer requests left: 90 of 100 (100-in-15min), 50 of 250 (250-in-1day)");
+	});
+
+	it("no notice while every window keeps its reserve", async () => {
+		host = await newHost();
+		await seedAll(host);
+		await seedState(host, { watchSince: ago(100), rateLimit: reading(96, 246, 2996) });
+		const analytics = await host.admin.loadPage(PAGE_PATH);
+		expect(text(analytics)).not.toContain("Reports paused");
+	});
+});
+
+describe("empty and missing figures", () => {
+	it("an empty block instead of a chart when nothing was sent or failed in the range", async () => {
+		host = await newHost();
+		await seedChannels(host, [LI]);
+		await seedConfig(host, { channels: allOn([LI]) });
+		await seedState(host, { watchSince: ago(100) });
+		const response = await host.admin.loadPage(PAGE_PATH);
+		expectValid(response);
+		expect(blocksOf(response).find((b) => b.block_id === "buffer:chart:sent")).toMatchObject({ type: "empty", title: "Nothing sent in this range" });
+		expect(blocksOf(response).some((b) => b.type === "timeseries")).toBe(false);
+	});
+
+	it("the widget puts missing engagement in a line of text, not a card", async () => {
+		host = await newHost();
+		await seedAll(host, { aggregates: false });
+		const response = await host.admin.loadWidget(WIDGET_ID);
+		expectValid(response);
+		const stats = blocksOf(response).find((b) => b.type === "stats") as { items: Array<{ value: string }> };
+		expect(stats.items).toHaveLength(3);
+		expect(stats.items.every((i) => /^\d+$/.test(i.value))).toBe(true);
+		expect(text(response)).toContain("Buffer has no engagement figures for the last 7 days yet.");
 	});
 });

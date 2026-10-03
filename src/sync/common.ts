@@ -1,14 +1,17 @@
 /**
  * What every report phase shares: the metered context, the Buffer client,
- * the stored state, and one way to record a failed read.
+ * the stored state, one way to record a failed read, and the shared-bucket
+ * guard every Buffer read checks first (`src/buffer/headroom.ts`).
  */
 
 import type { PluginContext } from "emdash/plugin";
 
 import { BufferClient, type BufferResult } from "../buffer/client.js";
+import { backfillDecision, backgroundDecision, type Decision, type WindowReading } from "../buffer/headroom.js";
+import type { RateLimitSnapshot } from "../buffer/ratelimit.js";
 import type { Meter } from "../publish/budget.js";
 import type { PluginSettings } from "../settings.js";
-import type { Stored } from "../store/kv.js";
+import { storedReadings, type Stored } from "../store/kv.js";
 import type { ReportState } from "../store/report.js";
 
 export interface PhaseContext {
@@ -56,4 +59,43 @@ export const BACKOFF_MS = 15 * 60_000;
 export function paused(p: PhaseContext): boolean {
 	if (p.report.pausedUntil && Date.parse(p.report.pausedUntil) > p.now.getTime()) return true;
 	return Boolean(p.report.problem && p.now.getTime() - Date.parse(p.report.problem.at) < BACKOFF_MS);
+}
+
+/**
+ * Keep a response's RateLimit reading. It travels in the report state,
+ * which every report run writes once at its end anyway, so keeping it
+ * costs no bridge call.
+ */
+export function observe(p: PhaseContext, rateLimit: RateLimitSnapshot | undefined): void {
+	if (rateLimit) p.report.rateLimit = rateLimit;
+}
+
+function readings(p: PhaseContext): Map<number, WindowReading> {
+	return storedReadings({ state: p.stored.state, channels: p.stored.channels, report: p.report }, p.now);
+}
+
+function record(p: PhaseContext, decision: Decision): boolean {
+	if (decision.allowed) return true;
+	p.report.headroom = { at: p.now.toISOString(), until: decision.until, window: decision.window };
+	return false;
+}
+
+/**
+ * Whether a background read may spend a Buffer request now. When it may
+ * not, the reason is recorded on the report state ("paused for headroom
+ * until ..."): not a failure, so `report.problem` is left alone and the
+ * phase simply stops.
+ */
+export function headroom(p: PhaseContext): boolean {
+	return record(p, backgroundDecision(readings(p), p.settings.headroomPercent));
+}
+
+/** Whether the backfill of older days may run: the same check, and half the 24-hour window left. Not recorded as a pause. */
+export function backfillHeadroom(p: PhaseContext): boolean {
+	return backfillDecision(readings(p), p.settings.headroomPercent).allowed;
+}
+
+/** At the end of a run: record the pause while the guard holds, clear it once it lifts. */
+export function settleHeadroom(p: PhaseContext): void {
+	if (headroom(p)) delete p.report.headroom;
 }

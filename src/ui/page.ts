@@ -23,9 +23,9 @@ import type { BufferChannel } from "../buffer/client.js";
 import { channelBlocker, ruleFor, supportsLinkCard, textLimit, type ResolvedRule } from "../buffer/services.js";
 import { reasonText, t, type Lang } from "../i18n.js";
 import type { PluginSettings } from "../settings.js";
-import { channelConfig, hintsFor, limitFor, type CollectionConfig, type Stored } from "../store/kv.js";
+import { channelConfig, hintsFor, latestRateLimit, limitFor, type CollectionConfig, type Stored } from "../store/kv.js";
 import { AGGREGATES_ID, LEDGER_ID, parseAggregates, parseLedger, REPORTS, type Aggregates, type Ledger, type RangeDays } from "../store/report.js";
-import { ANALYTICS_ACTION } from "./analytics.js";
+import { ANALYTICS_ACTION, headroomPausedUntil } from "./analytics.js";
 import {
 	actions,
 	banner,
@@ -43,6 +43,7 @@ import {
 	type FormField,
 	type PageBlock,
 } from "./blocks.js";
+import { formatTime } from "./format.js";
 
 /** A collection as `ctx.schema.listCollections()` describes it. */
 export type CollectionSchemaInfo = Awaited<ReturnType<NonNullable<PluginContext["schema"]>["listCollections"]>>[number];
@@ -64,6 +65,7 @@ export interface PageInput {
 	canManage: boolean;
 	/** The analytics range to return to. */
 	range: RangeDays;
+	now: Date;
 }
 
 /** Routable collections only: an entry without a public page has nothing to link to. */
@@ -131,8 +133,13 @@ function setupSection(input: PageInput): PageBlock[] {
 	blocks.push(header(t(lang, "channelsHeader")));
 	if (cache?.fetchedAt) blocks.push(context(t(lang, "channelsFetched", { date: day(cache.fetchedAt) })));
 	if (cache?.truncated) blocks.push(context(t(lang, "channelsTruncated", { count: cache.organizations.length })));
-	if (cache?.hints && Object.keys(cache.hints).length > 0) blocks.push(context(t(lang, "hintsFromBuffer")));
-	if (cache?.hintsNote) blocks.push(context(t(lang, "hintsUnavailable", { message: cache.hintsNote })));
+	// Where each rule comes from, and when Buffer's configuration was read with the channels.
+	if (cache?.fetchedAt) {
+		const time = formatTime(cache.fetchedAt, lang);
+		if (cache.hintsNote) blocks.push(context(t(lang, "hintsUnavailable", { message: cache.hintsNote, time })));
+		else if (cache.hints && Object.keys(cache.hints).length > 0) blocks.push(context(t(lang, "hintsFromBuffer", { time })));
+		else blocks.push(context(t(lang, "hintsNone", { time })));
+	}
 
 	const channels = cache?.channels ?? [];
 	blocks.push(
@@ -162,10 +169,14 @@ function setupSection(input: PageInput): PageBlock[] {
 		blocks.push(banner({ description: t(lang, "failedCount", { count: input.failed }), variant: "error" }));
 		if (canManage) blocks.push(actions([button(RETRY_ACTION, t(lang, "retry"))]));
 	}
-	const rate = stored.state.rateLimit ?? cache?.rateLimit;
+	const until = headroomPausedUntil(settings, stored, input.now);
+	if (until) blocks.push(banner({ description: t(lang, "headroomPaused", { time: formatTime(until, lang) }), variant: "alert" }));
+	// The newest reading from a delivery, a discovery or a report run.
+	const rate = latestRateLimit(stored);
 	if (rate) {
 		const windows = rate.windows.map((w) => `${w.remaining} of ${w.quota ?? "?"} (${w.name})`).join(", ");
 		blocks.push(context(t(lang, "rateLimit", { windows })));
+		blocks.push(context(t(lang, "headroomHelp")));
 	}
 	return blocks;
 }
@@ -193,7 +204,7 @@ function channelRow(input: PageInput, c: BufferChannel): Record<string, unknown>
 /** The rules that apply to a channel, each marked when it came from Buffer's configuration. */
 export function rulesText(lang: Lang, rule: ResolvedRule, limit: { max: number } | undefined): string {
 	const mark = (text: string, from: "configuration" | "documented") =>
-		from === "configuration" ? `${text} (${t(lang, "ruleFromBuffer")})` : text;
+		`${text} (${t(lang, from === "configuration" ? "ruleFromBuffer" : "ruleDocumented")})`;
 	const parts: string[] = [];
 	const image = rule.image === "needed" ? "ruleImageNeeded" : rule.image === "allowed" ? "ruleImageAllowed" : "ruleImageNever";
 	parts.push(mark(t(lang, image), rule.origin.image));

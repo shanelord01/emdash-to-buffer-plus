@@ -60,12 +60,19 @@ never in the runtime bundle). A plain `pnpm install` is enough.
   hook, cron task, page action, panel action and tool. Run it after any
   change that adds a `ctx` call. A publish already spends all ten when
   five channels are on and an image needs a media lookup.
-- **Buffer's limits are per key and shared.** 100 requests per 15
-  minutes, 250 a day and 3,000 in 30 days on the Free plan
-  (api-limits.md), counted for the API key, so any other tool on the same
-  key eats into them. The sync is shaped to stay at about 40 to 50 a day
-  for 10 channels; a new phase that asks Buffer on every run changes that
-  sum, and the README states it.
+- **Buffer's limits are per account and shared.** 100 requests per 15
+  minutes, 250 a day and 3,000 in 30 days on the Free plan (Team: 500 a
+  day, 15,000 in 30 days). Every API key and every MCP connection on the
+  account draws on one bucket, every request counts whether it succeeds
+  or fails, and only a 429 is refunded (api-limits.md,
+  efficient-api-usage.md). The sync is shaped to stay at about 40 to 50 a
+  day (1,200 to 1,500 a month) for 10 channels; a new phase that asks
+  Buffer on every run changes that sum, and the README states it. Every
+  background read asks `src/buffer/headroom.ts` before each request and
+  stops while a window is below its reserve; publishing stops only at
+  `r` = 0. Keep every response's RateLimit reading (the report state
+  carries it for report runs), and keep the recurring sync off :00 and
+  :30 (`syncSchedule`).
 - **Never resend after an uncertain answer.** Buffer documents no
   idempotency key for `createPost`. A timeout, lost connection, 5xx or
   `UNEXPECTED` may mean the post exists, so the record goes to `unknown`
@@ -201,7 +208,10 @@ There is no automated release. Every release goes like this:
    really landed.
 2. Bump `version` in `package.json` by hand, add the `CHANGELOG.md`
    entry, the README "What's new" line (dated, Sydney time, newest
-   first) and `docs/registry/changelog.md`.
+   first) and `docs/registry/changelog.md`. That registry tab is capped at
+   2000 graphemes (`emdash-plugin validate` and `tests/docs.test.ts` fail
+   over it): keep only the last two releases there and link to
+   `CHANGELOG.md` for the rest.
 3. Tag the merge commit `vX.Y.Z` and push the tag.
 4. Publish only with Shane's go, from a machine logged in to the
    registry as shane.bsky.shas.am. There is no dry run and versions are

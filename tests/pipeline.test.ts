@@ -8,12 +8,14 @@ import {
 	deliveries,
 	HOUR,
 	json,
+	limits,
 	mutationError,
 	newHost,
 	NOW,
 	postsCollection,
 	publishedPost,
 	rateLimited,
+	reading,
 	respond,
 	seedChannels,
 	seedConfig,
@@ -308,5 +310,68 @@ describe("continuation runs", () => {
 		await tick(host, "sync")();
 
 		expect((await host.inspect.storage.list("deliveries")).map((r) => r.id)).toEqual(["new"]);
+	});
+});
+
+describe("the shared bucket when publishing", () => {
+	it("sends below the reports' reserve: posts keep going out", async () => {
+		host = await setup([channel("c1", "linkedin")]);
+		await seedState(host, { ...watching, rateLimit: reading(3, 5, 40) });
+		const { event } = await publishedPost(host);
+		await respond(host, created("p1"));
+		await host.transport.invokeHook("content:afterPublish", event);
+		expect((await deliveries(host))[0]).toMatchObject({ status: "sent" });
+	});
+
+	it("holds every post while a window is spent, until it resets, without a request", async () => {
+		host = await setup();
+		await seedState(host, { ...watching, rateLimit: reading(50, 0, 2000) });
+		const { event } = await publishedPost(host);
+
+		await host.transport.invokeHook("content:afterPublish", event);
+
+		expect(host.http.requests()).toHaveLength(0);
+		const rows = await deliveries(host);
+		expect(rows.every((r) => r.status === "pending" && r.attempts === 0)).toBe(true);
+		// The day window resets 80,000 s after the reading, taken a minute ago.
+		const reset = NOW.getTime() - 60_000 + 80_000_000;
+		expect(Date.parse(rows[0]!.nextAttemptAt)).toBe(reset);
+		const task = (await host.inspect.scheduledTasks()).find((t) => t.name === "deliver-a");
+		expect(Date.parse(String(task?.nextRunAt))).toBe(reset);
+	});
+
+	it("a spent reading that has expired no longer holds anything", async () => {
+		host = await setup([channel("c1", "linkedin")]);
+		await seedState(host, { ...watching, rateLimit: { at: new Date(NOW.getTime() - 900_000).toISOString(), windows: [{ name: "100-in-15min", window: 900, quota: 100, remaining: 0, resetSeconds: 800 }] } });
+		const { event } = await publishedPost(host);
+		await respond(host, created("p1"));
+		await host.transport.invokeHook("content:afterPublish", event);
+		expect((await deliveries(host))[0]).toMatchObject({ status: "sent" });
+	});
+
+	it("a send that spends a window stops the rest of the run", async () => {
+		host = await newHost();
+		await seedState(host, watching);
+		await seedDelivery(host, "posts:e1:c1", { status: "pending" });
+		await seedDelivery(host, "posts:e2:c1", { entryId: "e2", status: "pending" });
+		await respond(host, json({ data: { createPost: { post: { id: "p1", status: "scheduled", dueAt: null, externalLink: null } } } }, 200, limits(0, 100, 2000)));
+
+		await tick(host, "deliver-a")();
+
+		expect(host.http.requests()).toHaveLength(1);
+		const rows = await deliveries(host);
+		expect(rows.filter((r) => r.status === "sent")).toHaveLength(1);
+		expect(rows.filter((r) => r.status === "pending")).toHaveLength(1);
+		const task = (await host.inspect.scheduledTasks()).find((t) => t.name === "deliver-b");
+		expect(Date.parse(String(task?.nextRunAt)) - Date.now()).toBeGreaterThan(700_000);
+	});
+
+	it("a delivery run with a spent window looks nothing up and sends nothing", async () => {
+		host = await newHost();
+		await seedState(host, { ...watching, rateLimit: reading(0, 100, 2000) });
+		await seedDelivery(host, "posts:e1:c1", { status: "unknown", lastAttemptAt: new Date(NOW.getTime() - HOUR).toISOString() });
+		await tick(host, "deliver-a")();
+		expect(host.http.requests()).toHaveLength(0);
+		expect((await deliveries(host))[0]).toMatchObject({ status: "unknown" });
 	});
 });

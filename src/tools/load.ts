@@ -37,7 +37,7 @@ import {
 	total,
 } from "../report/figures.js";
 import { DELIVERIES, type Delivery, type DeliveryStatus } from "../store/deliveries.js";
-import { channelConfig, hintsFor, limitFor, readStored, type Stored } from "../store/kv.js";
+import { channelConfig, hintsFor, latestRateLimit, limitFor, readStored, type Stored } from "../store/kv.js";
 import { AGGREGATES_ID, LEDGER_ID, parseAggregates, parseLedger, REPORTS, type Day } from "../store/report.js";
 import { isRecord } from "../values.js";
 
@@ -210,7 +210,8 @@ export async function channelHealth(ctx: PluginContext): Promise<ChannelHealthRe
 	const stored = await readStored(ctx);
 	const failedDeliveries = await ctx.storage[DELIVERIES]!.count({ status: "failed" });
 	const cache = stored.channels;
-	const rate = stored.state.rateLimit ?? cache?.rateLimit;
+	// The newest reading the plugin holds, from a delivery, a discovery or a report run.
+	const rate = latestRateLimit(stored);
 	return {
 		fetchedAt: cache?.fetchedAt || null,
 		discoveryError: cache?.error ? { at: cache.error.at, message: cache.error.message } : null,

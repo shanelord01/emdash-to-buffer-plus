@@ -10,6 +10,7 @@
 import type { PluginContext } from "emdash/plugin";
 
 import type { BufferChannel, BufferOrganization, DailyLimit } from "../buffer/client.js";
+import { currentWindows, newestSnapshot, type WindowReading } from "../buffer/headroom.js";
 import type { RateLimitSnapshot } from "../buffer/ratelimit.js";
 import type { AttachMode, ChannelHints, SkipReason } from "../buffer/services.js";
 import { DEFAULT_UTM, type UtmConfig } from "../publish/url.js";
@@ -76,6 +77,11 @@ export interface PluginState {
 	lastContinuation?: string;
 	lastRunAt?: string;
 	lastPruneAt?: string;
+	/**
+	 * This install's minute offset (0 to 59) for the recurring sync, picked
+	 * at random once so installs do not all ask Buffer on the hour.
+	 */
+	syncOffset?: number;
 }
 
 export interface Stored {
@@ -140,6 +146,20 @@ export function parseConfig(raw: unknown): PluginConfig {
 /** A channel's configuration, with the defaults a channel starts with. */
 export function channelConfig(config: PluginConfig, id: string): ChannelConfig {
 	return config.channels[id] ?? { enabled: false, mode: "addToQueue", attach: "image" };
+}
+
+/**
+ * Every RateLimit reading still in force, window by window, from the three
+ * places the plugin keeps one: the delivery state, the channel snapshot
+ * and the report state.
+ */
+export function storedReadings(stored: Pick<Stored, "state" | "channels" | "report">, now: Date): Map<number, WindowReading> {
+	return currentWindows([stored.state.rateLimit, stored.channels?.rateLimit, stored.report.rateLimit], now);
+}
+
+/** The newest reading the plugin holds, for the "requests left" line. */
+export function latestRateLimit(stored: Pick<Stored, "state" | "channels" | "report">): RateLimitSnapshot | undefined {
+	return newestSnapshot([stored.state.rateLimit, stored.channels?.rateLimit, stored.report.rateLimit]);
 }
 
 export function hintsFor(cache: ChannelCache | null, id: string): ChannelHints | undefined {
