@@ -51,6 +51,17 @@ export function formatDay(day: string, lang: Lang): string {
 	}
 }
 
+/** A UTC day as a chart label: "23 Sept". */
+export function formatShortDay(day: string, lang: Lang): string {
+	const ms = Date.parse(`${day.slice(0, 10)}T00:00:00.000Z`);
+	if (Number.isNaN(ms)) return day;
+	try {
+		return new Intl.DateTimeFormat(lang === "en" ? "en-AU" : lang, { day: "numeric", month: "short", timeZone: "UTC" }).format(ms);
+	} catch {
+		return day.slice(5, 10);
+	}
+}
+
 export type Trend = "up" | "down" | "neutral";
 
 /** Null when there is no earlier period to compare with: "neutral" would claim "unchanged". */

@@ -2,7 +2,16 @@ import type { PluginRuntimeTestHost } from "@emdash-cms/plugin-test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OVERRIDES } from "../src/store/overrides.js";
-import { PANEL_AGAIN_ACTION, PANEL_ID, PANEL_RETRY_ACTION, PANEL_SAVE_ACTION, PANEL_SHARE_ACTION } from "../src/ui/panel.js";
+import {
+	PANEL_AGAIN_ACTION,
+	PANEL_AGAIN_CONFIRM_ACTION,
+	PANEL_CANCEL_ACTION,
+	PANEL_ID,
+	PANEL_RETRY_ACTION,
+	PANEL_SAVE_ACTION,
+	PANEL_SHARE_ACTION,
+	PANEL_SHARE_CONFIRM_ACTION,
+} from "../src/ui/panel.js";
 import {
 	allOn,
 	channel,
@@ -183,8 +192,8 @@ describe("after the entry went to Buffer", () => {
 			[PANEL_RETRY_ACTION, `posts:${id}:c2`],
 			[PANEL_AGAIN_ACTION, `posts:${id}:c1`],
 		]);
-		// Send again asks first.
-		expect(buttons[1]!.confirm).toMatchObject({ title: "Send this post again?", style: "danger" });
+		// Send again asks in the panel, not in the host's dialog (emdash-cms/emdash#3644).
+		expect(buttons.every((b) => b.confirm === undefined)).toBe(true);
 	});
 
 	it("shows a queued post with its time", async () => {
@@ -203,9 +212,14 @@ describe("after the entry went to Buffer", () => {
 		expectValid(response);
 		expect(find(response.blocks, "button")).toHaveLength(0);
 
-		const again = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { user, value: `posts:${id}:c1` });
-		expect(again.toast).toMatchObject({ type: "error", message: "Only administrators can change this." });
+		for (const action of [PANEL_AGAIN_ACTION, PANEL_AGAIN_CONFIRM_ACTION]) {
+			const again = await host.admin.actEditorPanel(PANEL_ID, "posts", id, action, { user, value: `posts:${id}:c1` });
+			expectValid(again);
+			expect(again.toast).toMatchObject({ type: "error", message: "Only administrators can change this." });
+			expect(find(again.blocks, "button")).toHaveLength(0);
+		}
 		expect(host.http.requests()).toHaveLength(0);
+		expect(await deliveries(host)).toHaveLength(3);
 	});
 
 	it("Retry puts the failed post back and schedules a run", async () => {
@@ -219,11 +233,36 @@ describe("after the entry went to Buffer", () => {
 		expect(text(response)).toContain("My Facebook (facebook): waiting to be sent");
 	});
 
-	it("Send again posts the same text as a new delivery and keeps the first", async () => {
+	it("Send again asks first in the panel, sends nothing, and Cancel goes back", async () => {
+		const { runtime, id } = await sent();
+		host = runtime;
+		const asked = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:c1` });
+		expectValid(asked);
+		expect(asked.toast).toBeUndefined();
+		expect(find(asked.blocks, "banner")[0]).toMatchObject({
+			title: "Send this entry to My LinkedIn (linkedin) again?",
+			description: "Buffer gets a second post with the same text for My LinkedIn. The first post stays where it is.",
+		});
+		expect(find(asked.blocks, "button").map((b) => [b.action_id, b.value, b.style, b.label])).toEqual([
+			[PANEL_AGAIN_CONFIRM_ACTION, `posts:${id}:c1`, "primary", "Send again"],
+			[PANEL_CANCEL_ACTION, undefined, "secondary", "Cancel"],
+		]);
+		expect(host.http.requests()).toHaveLength(0);
+		expect(await deliveries(host)).toHaveLength(3);
+
+		const back = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_CANCEL_ACTION);
+		expectValid(back);
+		expect(back.toast).toBeUndefined();
+		expect(text(back)).toContain("My LinkedIn (linkedin): posted");
+		expect(find(back.blocks, "button").map((b) => b.action_id)).toEqual([PANEL_RETRY_ACTION, PANEL_AGAIN_ACTION]);
+		expect(host.http.requests()).toHaveLength(0);
+	});
+
+	it("Send again, confirmed, posts the same text as a new delivery and keeps the first", async () => {
 		const { runtime, id } = await sent();
 		host = runtime;
 		await respond(host, created("p2"));
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:c1` });
+		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:c1` });
 		expectValid(response);
 		expect(response.toast).toMatchObject({ type: "success", message: "Sent to Buffer again." });
 		const input = sentBodies(host)[0]!.variables.input as Record<string, unknown>;
@@ -237,7 +276,7 @@ describe("after the entry went to Buffer", () => {
 		const { runtime, id } = await sent();
 		host = runtime;
 		await respond(host, mutationError("Text is too long"));
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:c1` });
+		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:c1` });
 		expect(response.toast).toMatchObject({ type: "error", message: "Buffer did not take the post: Text is too long" });
 	});
 
@@ -249,16 +288,20 @@ describe("after the entry went to Buffer", () => {
 			status: "pending",
 			createdAt: new Date(NOW.getTime() - HOUR).toISOString(),
 		});
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:c1` });
-		expect(response.toast).toMatchObject({ type: "error" });
+		for (const action of [PANEL_AGAIN_ACTION, PANEL_AGAIN_CONFIRM_ACTION]) {
+			const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, action, { value: `posts:${id}:c1` });
+			expect(response.toast).toMatchObject({ type: "error", message: "A post to this channel is already on its way. Wait for it before sending again." });
+		}
 		expect(host.http.requests()).toHaveLength(0);
 	});
 
 	it("Send again is not offered for a delivery Buffer never took", async () => {
 		const { runtime, id } = await sent();
 		host = runtime;
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:c3` });
-		expect(response.toast).toMatchObject({ type: "error" });
+		for (const action of [PANEL_AGAIN_ACTION, PANEL_AGAIN_CONFIRM_ACTION]) {
+			const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, action, { value: `posts:${id}:c3` });
+			expect(response.toast).toMatchObject({ type: "error" });
+		}
 		expect(host.http.requests()).toHaveLength(0);
 	});
 });
@@ -286,7 +329,7 @@ describe("an entry published before the plugin started watching", () => {
 		return { runtime, id: item.id };
 	}
 
-	it("gives an administrator the line, the choices and Share now behind a confirm", async () => {
+	it("gives an administrator the line, the choices and Share now, which asks in the panel", async () => {
 		const { runtime, id } = await oldEntry();
 		host = runtime;
 		const response = await host.admin.loadEditorPanel(PANEL_ID, "posts", id);
@@ -295,7 +338,37 @@ describe("an entry published before the plugin started watching", () => {
 		const fields = (find(response.blocks, "form")[0]!.fields as Array<Record<string, unknown>>).map((f) => f.action_id);
 		expect(fields).toEqual(["send_c1", "text_c1", "send_c2", "text_c2"]);
 		const share = find(response.blocks, "button").find((b) => b.action_id === PANEL_SHARE_ACTION);
-		expect(share?.confirm).toMatchObject({ title: "Share this entry to 2 channels now?" });
+		expect(share).toMatchObject({ label: "Share now", style: "primary" });
+		expect(share?.confirm).toBeUndefined();
+	});
+
+	it("the first press of Share now asks, naming the channels, and sends nothing; Cancel goes back to the choices", async () => {
+		const { runtime, id } = await oldEntry();
+		host = runtime;
+		const asked = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION);
+		expectValid(asked);
+		expect(asked.toast).toBeUndefined();
+		expect(find(asked.blocks, "banner")[0]).toMatchObject({
+			title: "Share this entry to 2 channels now?",
+			description: "It goes to Buffer as if it had just been published. Only this entry is shared.",
+		});
+		// The video-only channel cannot take the entry, so it is not named.
+		expect(find(asked.blocks, "section").map((b) => b.text)).toEqual(["linkedin c1 (linkedin)", "facebook c2 (facebook)"]);
+		expect(find(asked.blocks, "button").map((b) => [b.action_id, b.style, b.label])).toEqual([
+			[PANEL_SHARE_CONFIRM_ACTION, "primary", "Share now"],
+			[PANEL_CANCEL_ACTION, "secondary", "Cancel"],
+		]);
+		expect(find(asked.blocks, "form")).toHaveLength(0);
+		expect(await deliveries(host)).toHaveLength(0);
+		expect(host.http.requests()).toHaveLength(0);
+
+		const back = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_CANCEL_ACTION);
+		expectValid(back);
+		expect(back.toast).toBeUndefined();
+		expect(find(back.blocks, "form")).toHaveLength(1);
+		expect(find(back.blocks, "button").map((b) => b.action_id)).toEqual([PANEL_SHARE_ACTION]);
+		expect(await deliveries(host)).toHaveLength(0);
+		expect(host.http.requests()).toHaveLength(0);
 	});
 
 	it("gives an editor the line and the link only", async () => {
@@ -309,9 +382,14 @@ describe("an entry published before the plugin started watching", () => {
 		expect(find(response.blocks, "button")).toHaveLength(0);
 		expect(text(response)).toContain('"kind":"plugin-page","path":"/buffer"');
 
-		const pressed = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION, { user });
-		expect(pressed.toast).toMatchObject({ type: "error", message: "Only administrators can change this." });
+		for (const action of [PANEL_SHARE_ACTION, PANEL_SHARE_CONFIRM_ACTION]) {
+			const pressed = await host.admin.actEditorPanel(PANEL_ID, "posts", id, action, { user });
+			expectValid(pressed);
+			expect(pressed.toast).toMatchObject({ type: "error", message: "Only administrators can change this." });
+			expect(find(pressed.blocks, "button")).toHaveLength(0);
+		}
 		expect(await deliveries(host)).toHaveLength(0);
+		expect(host.http.requests()).toHaveLength(0);
 	});
 
 	it("Share now sends this entry to the chosen channels, marked as shared by hand, and leaves the watch alone", async () => {
@@ -319,10 +397,12 @@ describe("an entry published before the plugin started watching", () => {
 		host = runtime;
 		const saved = await host.admin.submitEditorPanel(PANEL_ID, "posts", id, PANEL_SAVE_ACTION, { send_c1: true, text_c1: "", send_c2: false });
 		expectValid(saved);
-		expect(find(saved.blocks, "button").find((b) => b.action_id === PANEL_SHARE_ACTION)?.confirm).toMatchObject({ title: "Share this entry to 1 channel now?" });
+		const asked = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION);
+		expect(find(asked.blocks, "banner")[0]).toMatchObject({ title: "Share this entry to 1 channel now?" });
+		expect(find(asked.blocks, "section").map((b) => b.text)).toEqual(["linkedin c1 (linkedin)"]);
 
 		await respond(host, created("p1"));
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION);
+		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_CONFIRM_ACTION);
 		expectValid(response);
 		expect(response.toast).toMatchObject({ type: "success", message: "Shared to 1 channel." });
 		const rows = await deliveries(host);
@@ -333,11 +413,13 @@ describe("an entry published before the plugin started watching", () => {
 		expect(text(response)).toContain("Shared by hand.");
 		expect((await host.inspect.kv.get<{ watchSince: string }>("state"))?.watchSince).toBe(WATCH);
 
-		// A second press changes nothing.
+		// A second press, of either button, changes nothing.
 		host.http.clear();
-		const again = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION);
-		expectValid(again);
-		expect(again.toast).toMatchObject({ type: "error", message: "This entry has already gone to Buffer. Use Retry or Send again below." });
+		for (const action of [PANEL_SHARE_ACTION, PANEL_SHARE_CONFIRM_ACTION]) {
+			const again = await host.admin.actEditorPanel(PANEL_ID, "posts", id, action);
+			expectValid(again);
+			expect(again.toast).toMatchObject({ type: "error", message: "This entry has already gone to Buffer. Use Retry or Send again below." });
+		}
 		expect(host.http.requests()).toHaveLength(0);
 		expect(await deliveries(host)).toHaveLength(3);
 	});
@@ -346,7 +428,7 @@ describe("an entry published before the plugin started watching", () => {
 		const { runtime, id } = await oldEntry();
 		host = runtime;
 		await respond(host, created("p1"), created("p2"));
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION);
+		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_CONFIRM_ACTION);
 		expectValid(response);
 		expect(response.toast).toMatchObject({ type: "success", message: "Shared to 2 channels." });
 		expect((await deliveries(host)).filter((r) => r.status === "sent" && r.origin === "manual")).toHaveLength(2);
@@ -355,9 +437,11 @@ describe("an entry published before the plugin started watching", () => {
 	it("refuses an entry that is not published now", async () => {
 		const { runtime, id } = await oldEntry({ status: "draft" });
 		host = runtime;
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION);
-		expectValid(response);
-		expect(response.toast).toMatchObject({ type: "error", message: "This entry is not published, so it cannot be shared. Publish it first." });
+		for (const action of [PANEL_SHARE_ACTION, PANEL_SHARE_CONFIRM_ACTION]) {
+			const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, action);
+			expectValid(response);
+			expect(response.toast).toMatchObject({ type: "error", message: "This entry is not published, so it cannot be shared. Publish it first." });
+		}
 		expect(await deliveries(host)).toHaveLength(0);
 		expect(host.http.requests()).toHaveLength(0);
 	});
@@ -365,10 +449,12 @@ describe("an entry published before the plugin started watching", () => {
 	it("refuses an entry published after the watch began: the publish hook shares those", async () => {
 		const { runtime, id } = await setup();
 		host = runtime;
-		const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION);
-		expectValid(response);
-		expect(response.toast).toMatchObject({ type: "error" });
-		expect(String(response.toast?.message)).toContain("only for entries published before the plugin started watching");
+		for (const action of [PANEL_SHARE_ACTION, PANEL_SHARE_CONFIRM_ACTION]) {
+			const response = await host.admin.actEditorPanel(PANEL_ID, "posts", id, action);
+			expectValid(response);
+			expect(response.toast).toMatchObject({ type: "error" });
+			expect(String(response.toast?.message)).toContain("only for entries published before the plugin started watching");
+		}
 		expect(await deliveries(host)).toHaveLength(0);
 	});
 });

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION, SETUP_ACTION } from "../src/ui/analytics.js";
 import { CHANNEL_ACTION_PREFIX, COLLECTIONS_ACTION, DISCOVER_ACTION, PAGE_PATH, RETRY_ACTION, UTM_ACTION } from "../src/ui/page.js";
 import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
-import { PANEL_AGAIN_ACTION, PANEL_ID, PANEL_RETRY_ACTION, PANEL_SAVE_ACTION, PANEL_SHARE_ACTION } from "../src/ui/panel.js";
+import { PANEL_AGAIN_ACTION, PANEL_AGAIN_CONFIRM_ACTION, PANEL_CANCEL_ACTION, PANEL_ID, PANEL_RETRY_ACTION, PANEL_SAVE_ACTION, PANEL_SHARE_ACTION, PANEL_SHARE_CONFIRM_ACTION } from "../src/ui/panel.js";
 import { TOOL_ROUTES } from "../src/tools/load.js";
 import { bridgeCalls } from "./bridge-calls.js";
 import {
@@ -655,11 +655,27 @@ describe("the editor panel", () => {
 		expect(calls).toContain("cronSchedule");
 	});
 
+	it("Send again, first press, which asks and reads no more than a load", async () => {
+		host = await newHost();
+		const id = await panelSetup(host, { sent: true });
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:a` }));
+		// KV, settings, the entry's deliveries: the same three as a load after the send.
+		expect(calls, calls.join(", ")).toHaveLength(3);
+	});
+
+	it("Cancel", async () => {
+		host = await newHost();
+		const id = await panelSetup(host, { sent: true });
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_CANCEL_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).not.toContain("httpFetch");
+	});
+
 	it("Send again, rate-limited, which schedules a continuation and stores the reading", async () => {
 		host = await newHost();
 		const id = await panelSetup(host, { sent: true });
 		await respond(host, rateLimited(90));
-		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:a` }));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:a` }));
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect(calls).toContain("httpFetch");
 		expect(calls).toContain("cronSchedule");
@@ -669,7 +685,7 @@ describe("the editor panel", () => {
 		host = await newHost();
 		const id = await panelSetup(host, { sent: true });
 		await respond(host, created("p2"));
-		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_ACTION, { value: `posts:${id}:a` }));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:a` }));
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect((await deliveries(host)).filter((d) => d.postId === "p2")).toHaveLength(1);
 	});
@@ -699,11 +715,28 @@ describe("Share now on an entry from before the watch", () => {
 		expect(calls).toContain("contentGet");
 	});
 
+	it("the first press of Share now, which asks", async () => {
+		host = await newHost();
+		const id = await oldEntry(host, FIVE);
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(5);
+		expect(calls).toEqual(expect.arrayContaining(["contentGet", "storageGet"]));
+		expect(calls).not.toContain("httpFetch");
+		expect(await deliveries(host)).toHaveLength(0);
+	});
+
+	it("Cancel on Share now's question", async () => {
+		host = await newHost();
+		const id = await oldEntry(host, FIVE);
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_CANCEL_ACTION));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(5);
+	});
+
 	it("five channels with an image: the claim, then a continuation for those that do not fit", async () => {
 		host = await newHost();
 		const id = await oldEntry(host, FIVE);
 		for (const p of ["p1", "p2", "p3", "p4", "p5"]) await respond(host, created(p));
-		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_CONFIRM_ACTION));
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect(calls).toEqual(expect.arrayContaining(["contentGet", "contentPublicUrl", "mediaGet", "storagePutMany", "cronSchedule"]));
 		const rows = await deliveries(host);
@@ -716,7 +749,7 @@ describe("Share now on an entry from before the watch", () => {
 		host = await newHost();
 		const id = await oldEntry(host, FIVE.slice(0, 1));
 		await respond(host, created("p1"));
-		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_ACTION));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_SHARE_CONFIRM_ACTION));
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect((await deliveries(host))[0]).toMatchObject({ status: "sent", postId: "p1" });
 	});
