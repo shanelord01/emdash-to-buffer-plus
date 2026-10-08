@@ -12,8 +12,15 @@
 	// EmDash refuses an install whose host falls outside this range, so it
 	// carries a floor and no ceiling. Never ">=1.0.0": npm carries an
 	// accidental emdash@1.0.0 from April 2026.
+	//
+	// The banner is 1536x512: the registry shows banners at 3:1, so link
+	// previews show it whole. Listing images live in `images/`, which the
+	// bundle does not pack.
 	"release": {
-		"requires": { "env:emdash": ">=1.1.0" }
+		"requires": { "env:emdash": ">=1.1.0" },
+		"artifacts": {
+			"banner": { "file": "./images/banner.webp" }
+		}
 	},
 
 	"name": "EmDash to Buffer Plus",

@@ -1,5 +1,10 @@
 # emdash-to-buffer-plus
 
+## 0.1.5
+
+- The registry listing has a banner, `images/banner.webp`, declared as `release.artifacts.banner`. It is 1536x512 WebP (33 KB), the 3:1 shape the registry shows, so link previews show it whole.
+- No code, permission, capability or MCP tool changed, so Agent access stays on after the update. The registry changelog tab changed, so the package profile needs `emdash-plugin update-package`.
+
 ## 0.1.4
 
 On fueloracle.com.au (0.1.3) the first Share now, the Gunbarrel post to Facebook, Instagram and Threads, failed on all three: Buffer said "Invalid post: Image could not be read from its URL." Separately, the Engagement by day chart held a line "Threads (Not split)" with one value (1 on 13 September), a single 4 px point that was easy to miss, and it took the palette's first colour, so "Facebook (Direct)" was yellow there and blue on Impressions by day, where Threads has no line.

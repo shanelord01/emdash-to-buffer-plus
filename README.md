@@ -17,6 +17,9 @@ report what you find in the repository's issues.
 
 ## What's new
 
+**0.1.5, 9 October 2026**
+- A banner on the registry listing.
+
 **0.1.4, 3 October 2026**
 - Images now use the site's public media address. 0.1.3 and earlier sent
   an address that needs signing in, so Buffer could not read the image.
