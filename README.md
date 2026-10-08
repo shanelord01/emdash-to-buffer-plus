@@ -28,8 +28,9 @@ report what you find in the repository's issues.
   day and reads them again from Buffer, as far back as your plan allows
   (31 days on the Free plan). Until then the figure charts are empty.
 - A banner on the registry listing.
-- No new permissions and no MCP tool changes, so Agent access stays on
-  after the update.
+- No new permissions. The MCP tools now describe their days in your
+  time zone, so EmDash turns Agent access off after the update. Turn it
+  on again under Plugins.
 
 **0.1.4, 3 October 2026**
 - Images now use the site's public media address. 0.1.3 and earlier sent
