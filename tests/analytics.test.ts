@@ -2,9 +2,9 @@ import type { PluginRuntimeTestHost } from "@emdash-cms/plugin-test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Aggregates, AggregateDay, Origins, ReportState } from "../src/store/report.js";
-import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION } from "../src/ui/analytics.js";
+import { PAGE_REFRESH_ACTION, RANGE_ACTION, rangeAction, RETRY_ALL_ACTION } from "../src/ui/analytics.js";
 import { CHART_COLOURS, dailyChart } from "../src/ui/blocks.js";
-import { formatShortDay } from "../src/ui/format.js";
+import { formatRate, formatShortDay } from "../src/ui/format.js";
 import { PAGE_PATH } from "../src/ui/page.js";
 import { SETUP_ACTION } from "../src/ui/analytics.js";
 import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
@@ -105,6 +105,36 @@ describe("the Analytics view", () => {
 		const impressions = stats.items.find((i) => i.label === "Impressions, last 7 days");
 		expect(impressions).toMatchObject({ value: "700", description: "0% on the previous period", trend: "neutral" });
 		expect(text(response)).toContain('"label":"7 days","style":"primary","value":7');
+	});
+
+	it("gives each range button its own action id, reads the range from it, and still takes the id 0.1.5 sent", async () => {
+		host = await newHost();
+		await seedAll(host);
+		const page = await host.admin.loadPage(PAGE_PATH);
+		expectValid(page);
+		const ids = (JSON.stringify(page).match(/"action_id":"buffer:range[^"]*"/g) ?? []).map((m) => m.slice(13, -1));
+		expect(ids).toEqual(["buffer:range:7", "buffer:range:30", "buffer:range:90"]);
+		// Every button in one actions block has its own id: the admin keys them by it.
+		for (const block of JSON.parse(JSON.stringify(page)).blocks as Array<{ type: string; elements?: Array<{ action_id?: string }> }>) {
+			if (block.type !== "actions") continue;
+			const own = (block.elements ?? []).map((e) => e.action_id).filter(Boolean);
+			expect(new Set(own).size, own.join(", ")).toBe(own.length);
+		}
+
+		const week = await host.admin.act(PAGE_PATH, rangeAction(7));
+		expectValid(week);
+		expect(JSON.stringify(week)).toContain("Sent, last 7 days");
+		expect(JSON.stringify(week)).toContain('"action_id":"buffer:range:7","label":"7 days","style":"primary"');
+		// A page drawn by 0.1.5 sends the shared id with the days in the value.
+		const old = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 90 });
+		expect(JSON.stringify(old)).toContain("Sent, last 90 days");
+	});
+
+	it("shows engagement rates with one decimal place, so a column lines up", () => {
+		expect(formatRate(3, "en")).toBe("3.0%");
+		expect(formatRate(4.2, "en")).toBe("4.2%");
+		expect(formatRate(4.25, "en")).toBe("4.3%");
+		expect(formatRate(0, "en")).toBe("0.0%");
 	});
 
 	it("shows missing figures as missing, never as zero", async () => {
@@ -281,7 +311,7 @@ describe("Buffer's history limit on the page", () => {
 		expect(stats.items[3]?.value).toBe("3,100");
 		expect(body).toContain("Impressions by day, last 31 days");
 		expect(body).toContain('"label":"Impressions, last 31 days","format":"number"');
-		expect(body).toMatch(/"channel":"Shane on LinkedIn","service":"linkedin","sent":\d+,"failed":\d+,"impressions":3100,"rate":"5%"/);
+		expect(body).toMatch(/"channel":"Shane on LinkedIn","service":"linkedin","sent":\d+,"failed":\d+,"impressions":3100,"rate":"5.0%"/);
 		expect(body).toContain("over the last 31 days, the most your Buffer plan gives");
 		// The 90-day button stays.
 		expect(body).toContain('"label":"90 days","style":"primary"');
@@ -628,6 +658,32 @@ describe("charts over the whole range", () => {
 		expect(weekEngagement.series.map((s) => s.name)).toEqual(["Facebook (Direct)"]);
 		expect(colour(weekEngagement, "Facebook (Direct)")).toBe(facebook);
 		expect(colour(chartOf(week, "buffer:chart:impressions"), "Facebook (Direct)")).toBe(facebook);
+	});
+
+	it("names each line and its colour under the chart, since the host registers no legend", async () => {
+		const TH = channel("c5", "threads", { displayName: "FuelOracle Threads" });
+		host = await newHost();
+		await seedSplit(
+			host,
+			{ days: { c2: { [dayAgo(1)]: { direct: { posts: 1, engagement: 3, impressions: 30 } } } }, coveredFrom: { c2: dayAgo(6) } },
+			{ channels: [TH, FBX], methods: { c2: "listed" }, aggregates: { c5: { [dayAgo(3)]: { posts: 1, metrics: { reactions: 1 }, metricsUpdatedAt: NOW.toISOString() } } } },
+		);
+		const response = await host.admin.act(PAGE_PATH, rangeAction(30));
+		expectValid(response);
+		const NAMES = ["blue", "yellow", "pink", "purple", "teal", "orange"];
+		const contextText = (blockId: string) => {
+			const match = JSON.stringify(response).match(new RegExp(`"type":"context","text":"([^"]*)","block_id":"${blockId}"`));
+			return match?.[1];
+		};
+		for (const id of ["buffer:chart:engagement", "buffer:chart:impressions"]) {
+			const chart = chartOf(response, id);
+			expect(chart.series.length).toBeGreaterThan(0);
+			const expected = `Lines: ${chart.series.map((s) => `${s.name} in ${NAMES[CHART_COLOURS.indexOf(s.itemStyle!.color as (typeof CHART_COLOURS)[number])]}`).join(", ")}.`;
+			expect(contextText(`${id}:lines`), id).toBe(expected);
+		}
+		expect(contextText("buffer:chart:engagement:lines")).toContain("Threads (Not split) in");
+		// A legend option would draw nothing in EmDash's admin, so none is sent.
+		expect(JSON.stringify(response)).not.toContain('"legend"');
 	});
 
 	it("ten channels split two ways over 90 days stay inside Block Kit's node limit, keeping each chart's busiest lines", async () => {

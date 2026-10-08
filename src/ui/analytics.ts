@@ -38,11 +38,33 @@ import {
 import type { PluginSettings } from "../settings.js";
 import { channelConfig, hintsFor, limitFor, storedReadings, type Stored } from "../store/kv.js";
 import { daysBetween, RANGES, type Aggregates, type Day, type Ledger, type Origins, type RangeDays } from "../store/report.js";
-import { actions, banner, button, chartColour, columns, context, dailyChart, empty, header, link, stats, table, type PageBlock, type StatItem } from "./blocks.js";
+import { actions, banner, button, chartColour, colourName, columns, context, dailyChart, empty, header, link, stats, table, type PageBlock, type StatItem } from "./blocks.js";
 import { dayOf } from "../time/zone.js";
 import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatShortDay, formatTime, trendOf } from "./format.js";
 
+/**
+ * The range buttons' action. Each button carries its own id,
+ * `buffer:range:<days>` (`rangeAction`): the admin renders an actions
+ * block's buttons keyed by `action_id`, so three buttons sharing one id
+ * logged React's "two children with the same key". The bare id is what
+ * 0.1.5 and earlier sent, with the days in the value, and still works for
+ * a page drawn by them.
+ */
 export const RANGE_ACTION = "buffer:range";
+
+export function rangeAction(days: RangeDays): string {
+	return `${RANGE_ACTION}:${days}`;
+}
+
+/** Whether an action id is a range button's, new or old. */
+export function isRangeAction(actionId: string): boolean {
+	return actionId === RANGE_ACTION || actionId.startsWith(`${RANGE_ACTION}:`);
+}
+
+/** The range an action asks for: the days in a `buffer:range:<days>` id, else the value (0.1.5 and earlier, and the other buttons). */
+export function rangeOf(actionId: string, value: unknown): RangeDays {
+	return actionId.startsWith(`${RANGE_ACTION}:`) ? parseRange(actionId.slice(RANGE_ACTION.length + 1)) : parseRange(value);
+}
 export const PAGE_REFRESH_ACTION = "buffer:refresh";
 export const SETUP_ACTION = "buffer:setup";
 export const ANALYTICS_ACTION = "buffer:analytics";
@@ -239,7 +261,7 @@ function controls(range: RangeDays, lang: Lang): PageBlock {
 	// the raw value when closed.
 	return actions(
 		[
-			...RANGES.map((days) => button(RANGE_ACTION, t(lang, "rangeDays", { count: days }), { style: days === range ? "primary" : "secondary", value: days })),
+			...RANGES.map((days) => button(rangeAction(days), t(lang, "rangeDays", { count: days }), { style: days === range ? "primary" : "secondary", value: days })),
 			button(PAGE_REFRESH_ACTION, t(lang, "refresh"), { style: "secondary", value: range }),
 			link(t(lang, "openInBuffer"), { kind: "external", url: BUFFER_APP_URL }, { appearance: "secondary" }),
 			button(SETUP_ACTION, t(lang, "setup"), { style: "secondary", value: range }),
@@ -275,6 +297,15 @@ function figureStat(
 function splitText(series: OriginSeries[], key: "engagement" | "impressions", lang: Lang): string | null {
 	const totals = originTotals(series, key);
 	return totals ? t(lang, "originSplit", { direct: formatCount(totals.direct, lang), buffer: formatCount(totals.buffer, lang) }) : null;
+}
+
+/** "Lines: Facebook (Direct) in blue, Facebook (Buffer) in yellow." The host's charts have no legend. */
+export function linesKey(lines: Array<{ name: string; colour: string }>, lang: Lang): string {
+	const named = lines.map((line) => {
+		const key = colourName(line.colour);
+		return key ? t(lang, "chartLine", { name: line.name, colour: t(lang, key) }) : line.name;
+	});
+	return t(lang, "chartLines", { list: named.join(", ") });
 }
 
 const SERIES_KEY = { direct: "seriesDirect", buffer: "seriesBuffer", unsplit: "seriesUnsplit" } as const;
@@ -324,18 +355,21 @@ function figureCharts(series: OriginSeries[], channelIds: string[], days: Day[],
 			capped = { shown: maxLines, total: Math.max(lines.length, capped?.total ?? 0) };
 			lines = lines.filter((line) => keep.has(line));
 		}
-		return lines.length > 0
-			? dailyChart({ labels, series: lines.map(({ name, data, colour }) => ({ name, data, colour })), style: "line", height: 220, gradient: true, yAxisName, blockId })
-			: context(t(lang, "noFigures"));
+		if (lines.length === 0) return [context(t(lang, "noFigures"))];
+		return [
+			dailyChart({ labels, series: lines.map(({ name, data, colour }) => ({ name, data, colour })), style: "line", height: 220, gradient: true, yAxisName, blockId }),
+			// The host draws no legend: name each line and its colour.
+			context(linesKey(lines, lang), { blockId: `${blockId}:lines` }),
+		];
 	};
 	const block = columns([
 		[
 			header(limitedTo ? t(lang, "engagementByDayLast", { days: limitedTo }) : t(lang, "engagementByDay")),
-			chart("engagement", "buffer:chart:engagement", t(lang, "axisInteractions")),
+			...chart("engagement", "buffer:chart:engagement", t(lang, "axisInteractions")),
 		],
 		[
 			header(limitedTo ? t(lang, "impressionsByDayLast", { days: limitedTo }) : t(lang, "impressionsByDay")),
-			chart("impressions", "buffer:chart:impressions", t(lang, "axisTimesShown")),
+			...chart("impressions", "buffer:chart:impressions", t(lang, "axisTimesShown")),
 		],
 	]);
 	return { block, capped };

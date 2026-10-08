@@ -115,6 +115,25 @@ describe("content hooks", () => {
 		expect(calls).toContain("cronSchedule");
 	});
 
+	it("a publish with Instagram skipped for its image's shape costs no call of its own", async () => {
+		host = await newHost();
+		const five = [channel("g", "instagram"), ...FIVE.slice(0, 4)];
+		await postsCollection(host);
+		await seedChannels(host, five);
+		await seedConfig(host, { channels: allOn(five), collections: { posts: { enabled: true, image: "cover" } } });
+		await seedState(host, watching);
+		const { event } = await publishedPost(host, { cover: { ...COVER, width: 3000, height: 600 } });
+		for (const id of ["p1", "p2", "p3", "p4"]) await respond(host, created(id));
+
+		const calls = await bridgeCalls(() => host!.transport.invokeHook("content:afterPublish", event));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).not.toContain("mediaGet");
+		const rows = await deliveries(host);
+		expect(rows.find((r) => r.channelId === "g")).toMatchObject({ status: "skipped", reason: "imageAspect" });
+		expect(rows.filter((r) => r.status === "sent").length).toBeGreaterThanOrEqual(1);
+	});
+
 	it("a publish whose first send is rate-limited", async () => {
 		host = await newHost();
 		const { event } = await publishSetup(host);
@@ -740,6 +759,23 @@ describe("the editor panel", () => {
 		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
 		expect(calls).toContain("contentGet");
 		expect((await deliveries(host)).find((d) => d.postId === "p2")?.imageUrl).toBe("https://www.example.com/_emdash/api/media/file/01M3QY3VKJAWMFNS7TH6JHSA8W.jpg");
+	});
+
+	it("Send again of an Instagram record skipped for its image's shape, rate-limited, which reads the entry first", async () => {
+		host = await newHost();
+		const ig = [channel("g", "instagram"), ...FIVE.slice(0, 1)];
+		await postsCollection(host);
+		await seedChannels(host, ig);
+		await seedConfig(host, { channels: allOn(ig), collections: { posts: { enabled: true, image: "cover" } } });
+		await seedState(host, watching);
+		const { id } = await publishedPost(host, { cover: { ...COVER, width: 1080, height: 1350 } });
+		await seedDelivery(host, `posts:${id}:g`, { entryId: id, channelId: "g", service: "instagram", status: "skipped", reason: "imageAspect", imageWidth: 3000, imageHeight: 1000 });
+		await respond(host, rateLimited(90));
+		const calls = await bridgeCalls(() => host!.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:g` }));
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		expect(calls).toContain("contentGet");
+		expect(calls).toContain("httpFetch");
+		expect(calls).toContain("cronSchedule");
 	});
 
 	it("Send again, answered", async () => {

@@ -220,6 +220,21 @@ export interface DailySeries {
  */
 export const CHART_COLOURS = ["#4290F0", "#F5B647", "#E8649D", "#8D58EE", "#50C3B6", "#D37536"] as const;
 
+/**
+ * Each palette colour's name, in the same order, as a message key. EmDash
+ * registers no ECharts legend component (@emdash-cms/blocks 1.1.0 and
+ * 1.2.0 `echarts.use`: bar, line, pie, aria, axis pointer, grid, tooltip),
+ * so a `legend` option would draw nothing. The page names each line and
+ * its colour in a line of text under the chart instead.
+ */
+export const CHART_COLOUR_NAMES = ["colourBlue", "colourYellow", "colourPink", "colourPurple", "colourTeal", "colourOrange"] as const;
+
+/** The name key of a palette colour, or null for a colour outside the palette. */
+export function colourName(colour: string): (typeof CHART_COLOUR_NAMES)[number] | null {
+	const at = CHART_COLOURS.indexOf(colour.toUpperCase() as (typeof CHART_COLOURS)[number]);
+	return at < 0 ? null : CHART_COLOUR_NAMES[at]!;
+}
+
 /** The palette colour at a position, wrapping round as kumo's ChartPalette.categorical does. */
 export function chartColour(index: number): string {
 	return CHART_COLOURS[((index % CHART_COLOURS.length) + CHART_COLOURS.length) % CHART_COLOURS.length]!;
@@ -244,8 +259,9 @@ function rgba(hex: string, alpha: number): string {
  * first point to the last and joined them with a straight line. A custom
  * chart's tooltip is ECharts' own: the category label as the header, a
  * row per series and "-" for a missing day. The host strips every
- * `formatter` key and registers no legend, so the options are plain data
- * and series are told apart in the tooltip, as on the timeseries chart.
+ * `formatter` key and registers no legend component, so the options are
+ * plain data, series are told apart in the tooltip, and the caller names
+ * the lines and their colours in text under the chart (`CHART_COLOUR_NAMES`).
  * Everything else copies kumo's timeseries options (axes, dashed split
  * lines, grid, a gradient under a single line, bars stacked).
  *

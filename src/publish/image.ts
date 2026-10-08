@@ -27,6 +27,12 @@
  *   (`buildSeoImageUrl`): an absolute URL as it is, a site path joined to
  *   the site's URL, and a bare reference under the public file route.
  *
+ * The image's width and height go with the address when the image field's
+ * own value carries them (`MediaValue.width`/`height`, or the same under
+ * `meta`), so an Instagram delivery can be checked against the shapes
+ * Instagram takes (`./aspect.ts`). The SEO image, a bare string and a value without them have
+ * no known size.
+ *
  * No bridge call: everything is in the entry.
  */
 
@@ -35,7 +41,8 @@ import { isRecord, str } from "../values.js";
 export type ImageSource = { kind: "field"; field: string } | { kind: "seo" } | { kind: "none" };
 
 export type ImageResult =
-	| { ok: true; url: string; alt: string }
+	/** `width` and `height` in pixels, when the entry carries them for this image. */
+	| { ok: true; url: string; alt: string; width?: number; height?: number }
 	/** `noPublicAddress`: a local image whose storage key the entry does not carry, and no SEO image to stand in. */
 	| { ok: false; reason: "none" | "notPublic" | "noPublicAddress" };
 
@@ -62,9 +69,10 @@ export function resolveImage(source: ImageSource, content: { data: Record<string
 	const alt = str(value.alt);
 	const provider = str(value.provider) || "local";
 	const src = str(value.src);
+	const size = sizeOf(value);
 	if (provider !== "local") {
 		if (!src) return { ok: false, reason: "none" };
-		return checked(src, siteUrl, alt, { providerSrc: true });
+		return sized(checked(src, siteUrl, alt, { providerSrc: true }), size);
 	}
 	// The order EmDash itself follows. A local `src` under the public file
 	// route is canonical (emdash src/loader.ts normalizeLocalMediaValue,
@@ -74,15 +82,36 @@ export function resolveImage(source: ImageSource, content: { data: Record<string
 	// id is not its storage key, and that path would not exist.
 	if (src.startsWith(MEDIA_FILE_PATH) || /^https:\/\//i.test(src)) {
 		const fromSrc = checked(src.startsWith("/") ? join(siteUrl, src) : src, siteUrl, alt);
-		if (fromSrc.ok) return fromSrc;
+		if (fromSrc.ok) return sized(fromSrc, size);
 	}
 	const meta = isRecord(value.meta) ? value.meta : {};
 	const key = str(meta.storageKey) || str(value.storageKey);
 	if (key) {
 		const path = filePath(key);
-		if (path) return checked(join(siteUrl, path), siteUrl, alt);
+		if (path) return sized(checked(join(siteUrl, path), siteUrl, alt), size);
 	}
+	// The SEO image stands in: the field's size is not its size.
 	return standIn(content.seo, siteUrl, alt);
+}
+
+/**
+ * The image's size from an image field's value: `width` and `height` as
+ * EmDash caches them on the value, else under `meta`. Both must be whole
+ * numbers above zero, else the size is unknown.
+ */
+export function sizeOf(value: Record<string, unknown>): { width: number; height: number } | null {
+	const meta = isRecord(value.meta) ? value.meta : {};
+	for (const source of [value, meta]) {
+		const { width, height } = source;
+		if (typeof width === "number" && typeof height === "number" && Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0) {
+			return { width, height };
+		}
+	}
+	return null;
+}
+
+function sized(result: ImageResult, size: { width: number; height: number } | null): ImageResult {
+	return result.ok && size ? { ...result, width: size.width, height: size.height } : result;
 }
 
 /** The SEO image in place of a local image with no address, keeping the field's alt text. */

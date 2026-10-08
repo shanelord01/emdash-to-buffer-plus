@@ -43,8 +43,8 @@ import {
 	type FormField,
 	type PageBlock,
 } from "./blocks.js";
-import { dayOf, isDay } from "../time/zone.js";
-import { formatTime } from "./format.js";
+import { isDay } from "../time/zone.js";
+import { formatDay, formatTime } from "./format.js";
 
 /** A collection as `ctx.schema.listCollections()` describes it. */
 export type CollectionSchemaInfo = Awaited<ReturnType<NonNullable<PluginContext["schema"]>["listCollections"]>>[number];
@@ -113,7 +113,7 @@ export function renderSetup(input: PageInput): PageBlock[] {
 	blocks.push(...setupSection(input));
 
 	if (stored.state.watchSince) {
-		blocks.push(context(t(lang, "watchingSince", { date: day(stored.state.watchSince, settings.timeZone) })));
+		blocks.push(context(t(lang, "watchingSince", { date: when(stored.state.watchSince, lang, settings.timeZone) })));
 	}
 	return blocks;
 }
@@ -133,7 +133,7 @@ function setupSection(input: PageInput): PageBlock[] {
 	}
 
 	blocks.push(header(t(lang, "channelsHeader")));
-	if (cache?.fetchedAt) blocks.push(context(t(lang, "channelsFetched", { date: day(cache.fetchedAt, settings.timeZone) })));
+	if (cache?.fetchedAt) blocks.push(context(t(lang, "channelsFetched", { date: when(cache.fetchedAt, lang, settings.timeZone) })));
 	if (cache?.truncated) blocks.push(context(t(lang, "channelsTruncated", { count: cache.organizations.length })));
 	// Where each rule comes from, and when Buffer's configuration was read with the channels.
 	if (cache?.fetchedAt) {
@@ -340,8 +340,13 @@ export function collectionsFromForm(
 }
 
 /** A moment as its day in the zone, `YYYY-MM-DD`. A value that is already a day is kept. */
-function day(iso: string, zone: string): string {
-	return isDay(iso) || Number.isNaN(Date.parse(iso)) ? iso : dayOf(iso, zone);
+/**
+ * A stored day or moment as the rest of the admin writes it: a calendar day
+ * as "9 Oct 2026", a moment as "9 Oct 2026, 6:55 am AEDT", both in the
+ * "Time zone" setting. 0.1.5 showed the raw "2026-10-09" here.
+ */
+function when(value: string, lang: Lang, zone: string): string {
+	return isDay(value) ? formatDay(value, lang, zone) : formatTime(value, lang, zone);
 }
 
 /**
@@ -362,5 +367,5 @@ export function originsLine(input: Pick<PageInput, "lang" | "stored" | "settings
 		const name = c.displayName || c.name;
 		return [t(lang, row.method === "listed" ? "originListed" : "originDerived", { name, ...row.counts })];
 	});
-	return list.length > 0 ? t(lang, "originsSince", { date: day(summary.since, input.settings.timeZone), list: list.join("; ") }) : t(lang, "originsNotRead");
+	return list.length > 0 ? t(lang, "originsSince", { date: when(summary.since, input.lang, input.settings.timeZone), list: list.join("; ") }) : t(lang, "originsNotRead");
 }

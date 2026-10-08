@@ -18,7 +18,7 @@
 import type { SandboxedMcpTool } from "emdash/plugin";
 import { z } from "zod";
 
-import { SKIP_REASONS } from "../buffer/services.js";
+import { BLOCKED_REASONS } from "../buffer/services.js";
 import { DEFAULT_LIMIT, DEFAULT_SUMMARY_DAYS, DELIVERY_STATUSES, MAX_COLLECTION, MAX_ENTRY_ID, MAX_LIMIT, TOOL_ROUTES } from "./load.js";
 
 export function mcpTools(): Record<string, SandboxedMcpTool> {
@@ -122,7 +122,7 @@ export function mcpTools(): Record<string, SandboxedMcpTool> {
 						organizationId: z.string(),
 						sharing: z.boolean().describe("Turned on in the plugin and able to take entries."),
 						blocked: z
-							.object({ reason: z.enum(SKIP_REASONS as [string, ...string[]]), message: z.string() })
+							.object({ reason: z.enum(BLOCKED_REASONS as [string, ...string[]]), message: z.string() })
 							.nullable()
 							.describe("Why the channel cannot take entries now."),
 						disconnected: z.boolean(),

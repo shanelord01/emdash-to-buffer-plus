@@ -17,6 +17,31 @@ report what you find in the repository's issues.
 
 ## What's new
 
+**0.1.6, 9 October 2026**
+- Instagram takes images from 4:5 (tall) to 1.91:1 (wide) only,
+  and Buffer cannot crop. When the entry's image is known to be outside
+  that range, Instagram is now skipped up front with the reason ("The
+  image is 3:1. Instagram accepts 4:5 (tall) to 1.91:1 (wide).")
+  instead of being sent to fail at Buffer. Other networks are not
+  affected, and an image whose size the entry does not carry is sent as
+  before.
+- The editor panel warns before the first share, for example "My
+  Instagram (instagram) will skip this entry: its image is 3:1." After you choose a differently shaped
+  image and publish the change, Send again on that channel checks the
+  image again and sends it.
+- Send again is offered only once Buffer is done with a post (posted,
+  could not publish, or no longer in Buffer), never while it is queued,
+  sending, a draft or waiting for approval, so it cannot put a second
+  post beside one still waiting.
+- The engagement and impressions charts name each line and its colour
+  underneath, since EmDash's charts draw no legend.
+- Engagement rates show one decimal place ("3.0%" beside "4.2%"), the
+  Setup view writes its dates like the rest of the admin, the range
+  buttons no longer share one id (which logged a React warning), and a
+  Setup note reads more plainly.
+- No new permissions, settings or MCP tool changes, so Agent access stays
+  on after the update.
+
 **0.1.5, 9 October 2026**
 - Days are now your local days. 0.1.4 and earlier counted every post on
   its UTC day, so in Sydney anything posted before about 10 or 11 am
@@ -225,6 +250,18 @@ title and the link are never cut; if they alone are too long, that
 channel is skipped and says so. X is checked against its free-tier limit
 of 280, because Buffer does not say which tier a channel is on.
 
+Instagram takes images from 4:5 (tall) to 1.91:1 (wide) only,
+with no rounding (1024x536 is 1.9104:1 and refused), and Buffer cannot
+crop. When the image field carries the image's width and height, as
+EmDash stores them for media library images, an Instagram post whose
+image is outside that range is skipped with the reason "The image is
+3:1. Instagram accepts 4:5 (tall) to 1.91:1 (wide)." The editor
+panel warns before the first share. Choose a differently shaped image,
+publish the change, then use Send again on that channel. An image whose
+size the entry does not carry, such as the SEO image, is sent as before,
+since Buffer may still take it. Other networks always get the image as
+it is.
+
 Disconnected and locked channels are skipped with that reason. A network
 Buffer adds later gets text with the link in it, and Buffer's answer is
 recorded.
@@ -382,7 +419,8 @@ The charts cover every day of the range, or of what your Buffer plan
 gives. A day the post list covers with no posts of that origin is 0. A
 day without figures yet, and a figure the network does not report, is a
 gap, never a 0. Hovering shows the day and each line's figure, with "-"
-for a gap. With many channels over a long range, each chart keeps its
+for a gap. EmDash's charts have no legend, so a line under each chart
+names its lines and their colours. With many channels over a long range, each chart keeps its
 busiest lines and says so.
 
 Every day is a day in the "Time zone" setting: a post published at
@@ -445,7 +483,8 @@ an entry is being created.
   for this entry, and a text field for custom text on that channel
   (`{title}`, `{description}` (the entry's Description or SEO
   description, also written `{excerpt}`) and `{url}` still work). Save,
-  then publish.
+  then publish. A warning says when Instagram will skip the entry
+  because of its image's shape.
 - An entry first published before the plugin started watching: a line
   saying it was not shared automatically. Administrators also get the
   same choices and Share now, which asks in the panel, naming the
@@ -457,8 +496,13 @@ an entry is being created.
   "Time zone" setting), a
   link to the live post, Buffer's reason when it failed, and the skip
   reason when it was skipped. Administrators also see Retry for a failed
-  post and Send again for a post Buffer took, which asks in the panel
-  first and then sends the same text as a new post.
+  post and Send again for a post Buffer is done with (posted, could not
+  publish, or no longer in Buffer), which asks in the panel first and
+  then sends the same text as a new post. Send again is not offered
+  while a post is still queued, sending, a draft or waiting for approval
+  in Buffer. An Instagram post skipped for its image's shape also gets
+  Send again, which works the image out again from the published entry
+  and sends only when the shape fits.
 
 Editors and administrators can open the panel and save choices.
 

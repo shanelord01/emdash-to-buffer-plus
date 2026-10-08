@@ -13,6 +13,11 @@
  * A channel the editor left out for this entry in the editor panel gets a
  * `skipped` record with the reason `editorSkipped`, and its custom text
  * from the panel replaces the template.
+ *
+ * An Instagram channel whose image is known to be outside 4:5 to 1.91:1
+ * (`./aspect.ts`) gets a `skipped` record with the reason `imageAspect`.
+ * That record keeps the prepared text, link and image, so Send again can
+ * send it once the entry's image has been changed.
  */
 
 import type { PluginContext } from "emdash/plugin";
@@ -22,6 +27,7 @@ import type { PluginSettings } from "../settings.js";
 import { deliveryId, type Delivery } from "../store/deliveries.js";
 import { channelConfig, type PluginConfig, type ChannelCache, type CollectionConfig } from "../store/kv.js";
 import { isRecord, str } from "../values.js";
+import { shapeProblem } from "./aspect.js";
 import { resolveImage, type ImageResult, type ImageSource } from "./image.js";
 import { fitText } from "./text.js";
 import { canonicalUrl, httpUrl, withUtm } from "./url.js";
@@ -167,18 +173,25 @@ export async function prepareDeliveries(
 		const fitted = fitText(template, { title, excerpt, url: link }, textLimit(channel.service, channel.maxCharacters, hints));
 		if (!fitted.ok) return skip("textTooLong");
 
-		return {
-			id: deliveryId(entry.collection, entry.id, channel.id),
-			data: {
-				...base,
-				text: fitted.text,
-				url: link,
-				...(fitted.shortened && { shortened: true }),
-				...(image.ok && rule.image !== "never" && { imageUrl: image.url, imageAlt: image.alt }),
-				...(excerpt && { linkDescription: excerpt.slice(0, 300) }),
-				...(cfg.boardServiceId && rule.needsBoard && { boardServiceId: cfg.boardServiceId }),
-				...(hints && { hints }),
-			},
+		const sent = image.ok && rule.image !== "never" ? image : null;
+		const data: Delivery = {
+			...base,
+			text: fitted.text,
+			url: link,
+			...(fitted.shortened && { shortened: true }),
+			...(sent && { imageUrl: sent.url, imageAlt: sent.alt }),
+			...(excerpt && { linkDescription: excerpt.slice(0, 300) }),
+			...(cfg.boardServiceId && rule.needsBoard && { boardServiceId: cfg.boardServiceId }),
+			...(hints && { hints }),
 		};
+		// Instagram refuses a shape outside 4:5 to 1.91:1: skipped here, never sent to fail.
+		const shape = sent ? shapeProblem(channel.service, sent) : null;
+		if (shape) {
+			return {
+				id: deliveryId(entry.collection, entry.id, channel.id),
+				data: { ...data, status: "skipped", reason: "imageAspect", imageWidth: shape.width, imageHeight: shape.height },
+			};
+		}
+		return { id: deliveryId(entry.collection, entry.id, channel.id), data };
 	});
 }
