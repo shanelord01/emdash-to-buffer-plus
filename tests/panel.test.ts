@@ -181,7 +181,7 @@ describe("after the entry went to Buffer", () => {
 		const response = await host.admin.loadEditorPanel(PANEL_ID, "posts", id);
 		expectValid(response);
 		const body = text(response);
-		expect(body).toContain("My LinkedIn (linkedin): posted 3 Oct 2026, 1:30 am UTC");
+		expect(body).toContain("My LinkedIn (linkedin): posted 3 Oct 2026, 11:30 am AEST");
 		expect(body).toContain("https://www.linkedin.com/feed/update/p1");
 		expect(body).toContain("My Facebook (facebook): failed");
 		expect(body).toContain("Buffer said: The channel needs to be reconnected.");
@@ -201,7 +201,7 @@ describe("after the entry went to Buffer", () => {
 		host = runtime;
 		await seedDelivery(host, `posts:${id}:c1`, { entryId: id, status: "sent", postId: "p1", postStatus: "scheduled", dueAt: "2026-10-04T00:00:00.000Z" });
 		const response = await host.admin.loadEditorPanel(PANEL_ID, "posts", id);
-		expect(text(response)).toContain("queued in Buffer for 4 Oct 2026, 12:00 am UTC");
+		expect(text(response)).toContain("queued in Buffer for 4 Oct 2026, 11:00 am AEDT");
 	});
 
 	it("gives editors the states without Retry or Send again, and refuses the actions", async () => {

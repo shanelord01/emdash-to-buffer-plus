@@ -186,13 +186,13 @@ describe("report figures", () => {
 			ranges: {},
 			progress: {},
 		};
-		const { current } = periodOf(7, now);
+		const { current } = periodOf(7, now, "Australia/Sydney");
 		expect(figuresByDay(agg, ["a", "b"], current)).toEqual([{ day: "2026-10-03", engagement: 3, impressions: 10 }]);
 		expect(total(figuresByDay(agg, ["b"], current), "impressions")).toBeUndefined();
 	});
 
 	it("plans the last 30 days first, then the ranges, then older days, newest first", () => {
-		const windows = plan({ days: {}, ranges: {}, progress: { c: { recentOn: "2026-10-03", backTo: "2026-09-04" } } }, [{ id: "c", organizationId: "o" }], "2026-10-03");
+		const windows = plan({ days: {}, ranges: {}, progress: { c: { recentOn: "2026-10-03", backTo: "2026-09-04" } } }, [{ id: "c", organizationId: "o" }], "2026-10-03", "Australia/Sydney");
 		expect(windows.slice(0, 4).map((w) => [w.kind, w.window.key])).toEqual([
 			["range", "7"],
 			["range", "30"],
@@ -200,6 +200,7 @@ describe("report figures", () => {
 			["backfill", "2026-09-03"],
 		]);
 		expect(windows.at(-1)?.window.key).toBe("2026-04-07");
-		expect(plan({ days: {}, ranges: {}, progress: {} }, [{ id: "c", organizationId: "o" }], "2026-10-03")[0]).toMatchObject({ kind: "recent", window: { start: "2026-10-03T00:00:00Z", end: "2026-10-03T23:59:59Z" } });
+		// 3 October in Sydney (AEST, UTC+10), sent to Buffer as UTC instants.
+		expect(plan({ days: {}, ranges: {}, progress: {} }, [{ id: "c", organizationId: "o" }], "2026-10-03", "Australia/Sydney")[0]).toMatchObject({ kind: "recent", window: { start: "2026-10-02T14:00:00Z", end: "2026-10-03T13:59:59Z" } });
 	});
 });

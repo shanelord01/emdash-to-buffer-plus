@@ -1,7 +1,9 @@
 ## 0.1.5, 9 October 2026
 
+- Days are now your local days. 0.1.4 counted each post on its UTC day, so in Sydney a post before about 10 or 11 am showed a day early, and ranges turned over at UTC midnight. A new setting, Time zone (default Australia/Sydney), sets the zone for charts, ranges and times.
+- After the update the first sync drops the daily figures stored by UTC day and reads them again from Buffer, as far back as your plan allows (31 days on the Free plan). Until then the figure charts are empty.
 - A banner on the registry listing.
-- No code changes, no new permissions and no MCP tool output changes.
+- No new permissions and no MCP tool changes, so Agent access stays on.
 
 ## 0.1.4, 3 October 2026
 

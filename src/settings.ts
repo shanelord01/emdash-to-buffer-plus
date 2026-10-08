@@ -14,6 +14,7 @@
 
 import type { PluginContext } from "emdash/plugin";
 
+import { DEFAULT_TIME_ZONE, resolveTimeZone } from "./time/zone.js";
 import { clampNumber, str } from "./values.js";
 
 export interface PluginSettings {
@@ -33,6 +34,14 @@ export interface PluginSettings {
 	 * API key and MCP connection on the account draws on one bucket.
 	 */
 	headroomPercent: number;
+	/**
+	 * The IANA time zone the reports' days are in: which day a post counts
+	 * on, where "today" and each range start, and the times the admin shows.
+	 * EmDash 1.1 and 1.2 give a sandboxed plugin no site time zone
+	 * (`ctx.site` holds name, URL, locale and trailingSlash only), so it is
+	 * a setting. An unknown zone falls back to the default.
+	 */
+	timeZone: string;
 }
 
 export const DEFAULT_TEMPLATE = "{title}\n\n{excerpt}\n\n{url}";
@@ -42,6 +51,7 @@ export const MAX_RETENTION_DAYS = 730;
 export const DEFAULT_HEADROOM_PERCENT = 25;
 export const MIN_HEADROOM_PERCENT = 10;
 export const MAX_HEADROOM_PERCENT = 75;
+export { DEFAULT_TIME_ZONE };
 
 /**
  * The sync's choices, the same as the `syncInterval` select in
@@ -70,6 +80,7 @@ export function parseSettings(raw: Map<string, unknown>): PluginSettings {
 			? str(raw.get("syncInterval"))
 			: DEFAULT_SYNC_INTERVAL,
 		headroomPercent: clampNumber(raw.get("headroomPercent"), MIN_HEADROOM_PERCENT, MAX_HEADROOM_PERCENT, DEFAULT_HEADROOM_PERCENT),
+		timeZone: resolveTimeZone(raw.get("timeZone")),
 	};
 }
 

@@ -39,6 +39,7 @@ import type { PluginSettings } from "../settings.js";
 import { channelConfig, hintsFor, limitFor, storedReadings, type Stored } from "../store/kv.js";
 import { daysBetween, RANGES, type Aggregates, type Day, type Ledger, type Origins, type RangeDays } from "../store/report.js";
 import { actions, banner, button, chartColour, columns, context, dailyChart, empty, header, link, stats, table, type PageBlock, type StatItem } from "./blocks.js";
+import { dayOf } from "../time/zone.js";
 import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatShortDay, formatTime, trendOf } from "./format.js";
 
 export const RANGE_ACTION = "buffer:range";
@@ -106,25 +107,26 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	if (limit !== undefined) out.push(context(t(lang, "historyLimit", { days: limit }), { blockId: "buffer:history" }));
 	out.push(...banners(input, shared));
 
-	const { current, previous } = periodOf(range, now);
+	const zone = settings.timeZone;
+	const { current, previous } = periodOf(range, now, zone);
 	const watch = stored.state.watchSince;
-	const ledgerPrev = ledgerReaches(watch, previous);
+	const ledgerPrev = ledgerReaches(watch, previous, zone);
 	const ids = shared.map((c) => c.id);
 	// Buffer's figures cover what the plan allows: the last `figureRange` days.
 	const figureRange = effectiveDays(range, limit);
 	const limited = figureRange < range;
-	const figurePeriod = periodOf(figureRange, now);
+	const figurePeriod = periodOf(figureRange, now, zone);
 	const days = figuresByDay(aggregates, ids, figurePeriod.current);
 	const prevDays = aggregatesReach(aggregates, ids, figurePeriod.previous) ? figuresByDay(aggregates, ids, figurePeriod.previous) : null;
 	const methods = Object.fromEntries(Object.entries(stored.report.origins?.channels ?? {}).map(([id, row]) => [id, row.method]));
 	// The last pass of the post list covered every day up to the one it ran on.
-	const coveredTo = stored.report.origins?.at.slice(0, 10);
+	const coveredTo = stored.report.origins ? dayOf(stored.report.origins.at, zone) : undefined;
 	const series = originSeries(aggregates, input.origins, shared.map((c) => ({ id: c.id, service: c.service, name: c.displayName || c.name })), methods, figurePeriod.current, coveredTo);
 
-	const sent = sentIn(ledger, current);
-	const sentPrev = ledgerPrev ? sentIn(ledger, previous) : null;
-	const failed = failedIn(ledger, current);
-	const failedPrev = ledgerPrev ? failedIn(ledger, previous) : null;
+	const sent = sentIn(ledger, current, zone);
+	const sentPrev = ledgerPrev ? sentIn(ledger, previous, zone) : null;
+	const failed = failedIn(ledger, current, zone);
+	const failedPrev = ledgerPrev ? failedIn(ledger, previous, zone) : null;
 	const waiting = queued(ledger);
 	const next = nextQueued(ledger, now);
 	const items: StatItem[] = [
@@ -132,7 +134,7 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 		{
 			label: t(lang, "queuedNow"),
 			value: formatCount(waiting.length, lang),
-			description: waiting.length === 0 ? t(lang, "queuedNone") : next?.dueAt ? t(lang, "queuedNext", { date: formatDay(next.dueAt, lang) }) : t(lang, "queuedWaiting"),
+			description: waiting.length === 0 ? t(lang, "queuedNone") : next?.dueAt ? t(lang, "queuedNext", { date: formatDay(next.dueAt, lang, zone) }) : t(lang, "queuedWaiting"),
 		},
 		// No arrow on failures: an arrow up reads as good news.
 		countStat(t(lang, "failedLastDays", { days: range }), failed, failedPrev, lang, false),
@@ -142,7 +144,7 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	out.push(stats(items, { blockId: "buffer:stats" }));
 
 	// Every day of the range is on the axis. A day before the plugin watched has no bar and shows "-".
-	const sends = new Map(sendsByDay(ledger, current, watch).map((d) => [d.day, d]));
+	const sends = new Map(sendsByDay(ledger, current, watch, zone).map((d) => [d.day, d]));
 	// A chart of nothing draws an empty 0 to 1 axis: say so instead.
 	if (![...sends.values()].some((d) => d.sent > 0 || d.failed > 0)) {
 		out.push(empty({ title: t(lang, "chartNothingTitle"), description: t(lang, "chartNothingText"), blockId: "buffer:chart:sent" }));
@@ -165,7 +167,7 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 	const notes = [
 		input.stored.report.lastSyncAt ? t(lang, "syncedAgo", { age: formatAge(input.stored.report.lastSyncAt, now, lang) ?? "" }) : t(lang, "notSyncedYet"),
 		t(lang, "todayCounting"),
-		...(since && daysBetween(figurePeriod.current.start, since) > 0 ? [t(lang, "figuresSince", { date: formatDay(since, lang) })] : []),
+		...(since && daysBetween(figurePeriod.current.start, since) > 0 ? [t(lang, "figuresSince", { date: formatDay(since, lang, zone) })] : []),
 	];
 	out.push(context(notes.join(" · ")));
 
@@ -193,7 +195,7 @@ export function renderAnalytics(input: AnalyticsInput): PageBlock[] {
 				{ key: "impressions", label: t(lang, "colImpressions"), format: "number" },
 				{ key: "post", label: t(lang, "colPost"), format: "element" },
 			],
-			rows: topEntries(ledger, current, TOP_ENTRIES).map((e) => ({
+			rows: topEntries(ledger, current, TOP_ENTRIES, zone).map((e) => ({
 				entry: e.title || t(lang, "untitled"),
 				channel: channelName(stored, e.channelId) ?? e.channelName,
 				service: e.service,
@@ -346,7 +348,7 @@ function channelName(stored: Stored, id: string): string | undefined {
 
 function channelRows(input: AnalyticsInput, shared: BufferChannel[], current: { start: string; end: string }): Array<Record<string, unknown>> {
 	const { lang, ledger, aggregates, range, stored } = input;
-	return channelTotals(ledger, aggregates, shared.map((c) => c.id), current, range).map((row) => ({
+	return channelTotals(ledger, aggregates, shared.map((c) => c.id), current, range, input.settings.timeZone).map((row) => ({
 		channel: channelName(stored, row.channelId) ?? row.channelName ?? row.channelId,
 		service: stored.channels?.channels.find((c) => c.id === row.channelId)?.service ?? row.service ?? "",
 		sent: row.sent,
@@ -389,7 +391,7 @@ function banners(input: AnalyticsInput, shared: BufferChannel[]): PageBlock[] {
 	if (atLimit) out.push(banner({ description: t(lang, "bannerAtLimit", { names: atLimit }), variant: "alert" }));
 
 	const until = headroomPausedUntil(settings, stored, now);
-	if (until) out.push(banner({ description: t(lang, "headroomPaused", { time: formatTime(until, lang) }), variant: "alert", blockId: "buffer:headroom" }));
+	if (until) out.push(banner({ description: t(lang, "headroomPaused", { time: formatTime(until, lang, settings.timeZone) }), variant: "alert", blockId: "buffer:headroom" }));
 
 	const report = stored.report;
 	if (report.pausedUntil && Date.parse(report.pausedUntil) > now.getTime()) {

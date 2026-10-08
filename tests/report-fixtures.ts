@@ -1,6 +1,7 @@
 import type { PluginRuntimeTestHost } from "@emdash-cms/plugin-test";
 
-import type { Aggregates, Ledger, LedgerEntry, ReportState } from "../src/store/report.js";
+import type { Aggregates, Ledger, LedgerEntry, Origins, ReportState } from "../src/store/report.js";
+import { addDays, dayOf, DEFAULT_TIME_ZONE } from "../src/time/zone.js";
 import { json, NOW } from "./host.js";
 
 /**
@@ -13,8 +14,10 @@ import { json, NOW } from "./host.js";
  */
 
 export const DAY = 24 * 60 * 60 * 1000;
-export const today = NOW.toISOString().slice(0, 10);
-export const dayAgo = (n: number) => new Date(NOW.getTime() - n * DAY).toISOString().slice(0, 10);
+/** The zone the tests' sites leave at its default: the reports' days are Sydney days. */
+export const ZONE = DEFAULT_TIME_ZONE;
+export const today = dayOf(NOW, ZONE);
+export const dayAgo = (n: number) => addDays(today, -n);
 
 export function metric(type: string, value: number, unit: "count" | "percentage" = "count") {
 	return { type, value, unit };
@@ -69,6 +72,7 @@ export function nothingDue(): ReportState {
 		scan: { at: stamp },
 		metrics: { day: today, at: stamp },
 		aggregates: { at: stamp, done: today },
+		dayZone: ZONE,
 	};
 }
 
@@ -92,6 +96,11 @@ export async function seedLedger(host: PluginRuntimeTestHost, entries: Record<st
 	await host.fixtures.plugin.storage("reports", "ledger", ledger);
 }
 
+/** Seeds the row keyed in the default zone, as 0.1.5 writes it, unless the row names its own. */
 export async function seedAggregates(host: PluginRuntimeTestHost, aggregates: Aggregates) {
-	await host.fixtures.plugin.storage("reports", "aggregates", aggregates);
+	await host.fixtures.plugin.storage("reports", "aggregates", { zone: ZONE, ...aggregates });
+}
+
+export async function seedOrigins(host: PluginRuntimeTestHost, origins: Origins) {
+	await host.fixtures.plugin.storage("reports", "origins", { zone: ZONE, ...origins });
 }

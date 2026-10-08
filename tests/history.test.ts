@@ -8,7 +8,8 @@ import { plan } from "../src/sync/aggregates.js";
 import { addOrigins, metricsWindow } from "../src/sync/metrics.js";
 import type { Aggregates, OriginWork, ReportState } from "../src/store/report.js";
 import { allOn, channel, HOUR, json, newHost, NOW, respond, seedChannels, seedConfig, sentBodies, tick } from "./host.js";
-import { aggregatesAnswer, baseline, dayAgo, metric, metricsAnswer, nothingDue, postNode, seedReport, today } from "./report-fixtures.js";
+import { dayEnd, dayStart } from "../src/time/zone.js";
+import { aggregatesAnswer, baseline, dayAgo, metric, metricsAnswer, nothingDue, postNode, seedReport, today, ZONE } from "./report-fixtures.js";
 
 /**
  * Buffer's per-plan history limit, learnt from its refusal ("Free-plan
@@ -94,17 +95,17 @@ describe("windows under a known limit", () => {
 
 	it("the backfill stops at today minus (limit - 1) and the 90-day range covers the limit", () => {
 		const agg: Aggregates = { days: {}, ranges: {}, progress: { c1: { recentOn: today, backTo: dayAgo(29) } } };
-		const planned = plan(agg, targets, today, true, 31);
+		const planned = plan(agg, targets, today, ZONE, true, 31);
 		const backfill = planned.filter((p) => p.kind === "backfill").map((p) => p.window.key);
 		expect(backfill).toEqual([dayAgo(30)]);
 		const range90 = planned.find((p) => p.kind === "range" && p.window.key === "90");
-		expect(range90).toMatchObject({ days: 31, window: { start: `${dayAgo(30)}T00:00:00Z` } });
+		expect(range90).toMatchObject({ days: 31, window: { start: dayStart(dayAgo(30), ZONE) } });
 		expect(planned.find((p) => p.window.key === "30")?.days).toBe(30);
 	});
 
 	it("without a limit nothing changes", () => {
 		const agg: Aggregates = { days: {}, ranges: {}, progress: { c1: { recentOn: today, backTo: dayAgo(29) } } };
-		expect(plan(agg, targets, today, true).find((p) => p.window.key === "90")?.window.start).toBe(`${dayAgo(89)}T00:00:00Z`);
+		expect(plan(agg, targets, today, ZONE, true).find((p) => p.window.key === "90")?.window.start).toBe(dayStart(dayAgo(89), ZONE));
 	});
 
 	it("the posts window stays inside the limit, slack included", () => {
@@ -155,6 +156,7 @@ describe("posts by origin", () => {
 			new Set(["c1"]),
 			dayAgo(29),
 			today,
+			ZONE,
 		);
 		expect(work.counts.c1).toEqual({ network: 2, buffer: 1, api: 1 });
 		const day = work.days.c1?.[today];
@@ -176,7 +178,7 @@ describe("learning the limit in the sync", () => {
 		await seedChannels(host, [LI]);
 		await seedConfig(host, { channels: allOn([LI]) });
 		await seedReport(host, state);
-		if (agg) await host.fixtures.plugin.storage("reports", "aggregates", agg);
+		if (agg) await host.fixtures.plugin.storage("reports", "aggregates", { zone: ZONE, ...agg });
 		return host;
 	}
 	const recentDone = (): Aggregates => ({ days: {}, ranges: {}, progress: { c1: { recentOn: today, backTo: dayAgo(29) } } });
@@ -190,9 +192,9 @@ describe("learning the limit in the sync", () => {
 		const bodies = sentBodies(host);
 		expect(bodies).toHaveLength(2);
 		// The first ask went 90 days back; the retry starts inside the 31 days.
-		expect(bodies[0]!.variables.a2).toMatchObject({ startDateTime: `${dayAgo(89)}T00:00:00Z` });
-		expect(bodies[1]!.variables.a2).toMatchObject({ startDateTime: `${dayAgo(30)}T00:00:00Z` });
-		expect(bodies[1]!.variables.a3).toMatchObject({ startDateTime: `${dayAgo(30)}T00:00:00Z`, endDateTime: `${dayAgo(30)}T23:59:59Z` });
+		expect(bodies[0]!.variables.a2).toMatchObject({ startDateTime: dayStart(dayAgo(89), ZONE) });
+		expect(bodies[1]!.variables.a2).toMatchObject({ startDateTime: dayStart(dayAgo(30), ZONE) });
+		expect(bodies[1]!.variables.a3).toMatchObject({ startDateTime: dayStart(dayAgo(30), ZONE), endDateTime: dayEnd(dayAgo(30), ZONE) });
 		const state = await report(host);
 		expect(state.insightsHistory).toMatchObject({ days: 31 });
 		expect(state.problem).toBeUndefined();
@@ -224,7 +226,7 @@ describe("learning the limit in the sync", () => {
 		// The ranges are asked again, the 90-day one cut to the limit; the backfill is done.
 		const retry = sentBodies(host)[1]!.variables;
 		expect(Object.keys(retry)).toHaveLength(3);
-		expect(retry.a2).toMatchObject({ startDateTime: `${dayAgo(30)}T00:00:00Z` });
+		expect(retry.a2).toMatchObject({ startDateTime: dayStart(dayAgo(30), ZONE) });
 		expect(agg?.ranges.c1?.["90"]).toMatchObject({ days: 31, metrics: { impressions: 40 } });
 	});
 
@@ -265,7 +267,7 @@ describe("learning the limit in the sync", () => {
 		await tick(host, "sync")();
 
 		expect((await report(host)).insightsHistory?.days).toBe(30);
-		expect(sentBodies(host)[1]!.variables.a2).toMatchObject({ startDateTime: `${dayAgo(29)}T00:00:00Z` });
+		expect(sentBodies(host)[1]!.variables.a2).toMatchObject({ startDateTime: dayStart(dayAgo(29), ZONE) });
 	});
 
 	it("once a week asks for one day beyond the limit, alone, and drops the limit when Buffer answers", async () => {
@@ -277,11 +279,11 @@ describe("learning the limit in the sync", () => {
 
 		const [check] = sentBodies(host);
 		expect(Object.keys(check!.variables)).toEqual(["a0"]);
-		expect(check!.variables.a0).toMatchObject({ startDateTime: `${dayAgo(31)}T00:00:00Z`, endDateTime: `${dayAgo(31)}T23:59:59Z` });
+		expect(check!.variables.a0).toMatchObject({ startDateTime: dayStart(dayAgo(31), ZONE), endDateTime: dayEnd(dayAgo(31), ZONE) });
 		const state = await report(host);
 		expect(state.insightsHistory).toBeUndefined();
 		// The ranges are read again over their full length.
-		expect(sentBodies(host)[1]!.variables.a0).toMatchObject({ startDateTime: `${dayAgo(6)}T00:00:00Z` });
+		expect(sentBodies(host)[1]!.variables.a0).toMatchObject({ startDateTime: dayStart(dayAgo(6), ZONE) });
 	});
 
 	it("the weekly check refused again keeps the limit and notes when it was checked", async () => {
@@ -306,8 +308,8 @@ describe("learning the limit in the sync", () => {
 		const bodies = sentBodies(host);
 		expect(bodies).toHaveLength(2);
 		const start = (i: number) => (bodies[i]!.variables.input as { filter: { createdAt: { start: string } } }).filter.createdAt.start;
-		expect(start(0)).toBe(`${dayAgo(36)}T00:00:00Z`);
-		expect(start(1)).toBe(`${dayAgo(13)}T00:00:00Z`);
+		expect(start(0)).toBe(dayStart(dayAgo(36), ZONE));
+		expect(start(1)).toBe(dayStart(dayAgo(13), ZONE));
 		const state = await report(host);
 		expect(state.insightsHistory?.days).toBe(14);
 		expect(state.problem).toBeUndefined();

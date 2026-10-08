@@ -22,6 +22,10 @@ import { SKIP_REASONS } from "../buffer/services.js";
 import { DEFAULT_LIMIT, DEFAULT_SUMMARY_DAYS, DELIVERY_STATUSES, MAX_COLLECTION, MAX_ENTRY_ID, MAX_LIMIT, TOOL_ROUTES } from "./load.js";
 
 export function mcpTools(): Record<string, SandboxedMcpTool> {
+	// Since 0.1.5 the days follow the "Time zone" setting (src/time/zone.ts).
+	// The descriptions here still say UTC: any change to this text changes
+	// the manifest's mcp.tools, which asks for approval and turns Agent
+	// access off. Correct them with the next release that changes a tool.
 	const iso = z.string().describe("ISO 8601, UTC.");
 	const day = z.string().describe("A UTC day, YYYY-MM-DD.");
 	const lastSync = iso.nullable().describe("When the plugin last synced with Buffer, or null before the first sync.");

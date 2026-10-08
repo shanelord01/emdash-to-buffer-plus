@@ -13,6 +13,9 @@
  *   out, and Buffer's own engagement rate per channel. These include posts
  *   made in Buffer itself; the page says so.
  *
+ * Every day is a calendar day in the "Time zone" setting: a post counts on
+ * the day it went out there, and a period ends on today there.
+ *
  * Missing stays missing: a day Buffer has not read (`metricsUpdatedAt`
  * null) adds nothing, a metric a network does not report is absent, and a
  * total over nothing is `undefined`, which the page shows as "No figures
@@ -21,15 +24,17 @@
 
 import { engagementOf, engagementRateOf, impressionsOf } from "../buffer/metrics.js";
 import { OPEN_POST_STATUSES } from "../store/deliveries.js";
-import { addDays, daysBetween, utcDay, type Aggregates, type Day, type Ledger, type LedgerEntry, type OriginDay, type OriginMethod, type Origins } from "../store/report.js";
+import { dayOf } from "../time/zone.js";
+import { addDays, daysBetween, type Aggregates, type Day, type Ledger, type LedgerEntry, type OriginDay, type OriginMethod, type Origins } from "../store/report.js";
 
 export interface Period {
 	start: Day;
 	end: Day;
 }
 
-export function periodOf(days: number, now: Date): { current: Period; previous: Period } {
-	const end = utcDay(now);
+/** The last `days` days in the zone, ending today, and the same number of days before them. */
+export function periodOf(days: number, now: Date, zone: string): { current: Period; previous: Period } {
+	const end = dayOf(now, zone);
 	const start = addDays(end, -(days - 1));
 	return { current: { start, end }, previous: { start: addDays(start, -days), end: addDays(start, -1) } };
 }
@@ -45,10 +50,10 @@ export function within(day: Day, p: Period): boolean {
 	return daysBetween(p.start, day) >= 0 && daysBetween(day, p.end) >= 0;
 }
 
-/** The day a post went out: Buffer's sentAt, else the time it was due. */
-export function sentDay(e: LedgerEntry): Day | null {
+/** The day a post went out in the zone: Buffer's sentAt, else the time it was due. */
+export function sentDay(e: LedgerEntry, zone: string): Day | null {
 	const at = e.sentAt ?? e.dueAt;
-	return at ? at.slice(0, 10) : null;
+	return at && !Number.isNaN(Date.parse(at)) ? dayOf(at, zone) : null;
 }
 
 export function isSent(e: LedgerEntry): boolean {
@@ -65,16 +70,17 @@ export function isFailed(e: LedgerEntry): boolean {
 	return e.status === "failed" || e.postStatus === "error";
 }
 
-function failedDay(e: LedgerEntry): Day {
-	return e.createdAt.slice(0, 10);
+/** The day in the zone a record was made: where a failure counts. */
+function failedDay(e: LedgerEntry, zone: string): Day {
+	return Number.isNaN(Date.parse(e.createdAt)) ? "" : dayOf(e.createdAt, zone);
 }
 
-export function sentIn(ledger: Ledger, p: Period): number {
-	return Object.values(ledger.entries).filter((e) => isSent(e) && within(sentDay(e) ?? "", p)).length;
+export function sentIn(ledger: Ledger, p: Period, zone: string): number {
+	return Object.values(ledger.entries).filter((e) => isSent(e) && within(sentDay(e, zone) ?? "", p)).length;
 }
 
-export function failedIn(ledger: Ledger, p: Period): number {
-	return Object.values(ledger.entries).filter((e) => isFailed(e) && within(failedDay(e), p)).length;
+export function failedIn(ledger: Ledger, p: Period, zone: string): number {
+	return Object.values(ledger.entries).filter((e) => isFailed(e) && within(failedDay(e, zone), p)).length;
 }
 
 export function queued(ledger: Ledger): LedgerEntry[] {
@@ -89,8 +95,8 @@ export function nextQueued(ledger: Ledger, now: Date): LedgerEntry | undefined {
 }
 
 /** Sent and failed per day over a period, from the first day the plugin watched. */
-export function sendsByDay(ledger: Ledger, p: Period, watchSince: string | undefined): Array<{ day: Day; sent: number; failed: number }> {
-	const first = watchSince ? watchSince.slice(0, 10) : p.start;
+export function sendsByDay(ledger: Ledger, p: Period, watchSince: string | undefined, zone: string): Array<{ day: Day; sent: number; failed: number }> {
+	const first = watchSince ? dayOf(watchSince, zone) : p.start;
 	const out: Array<{ day: Day; sent: number; failed: number }> = [];
 	for (let day = daysBetween(first, p.start) >= 0 ? p.start : first; daysBetween(day, p.end) >= 0; day = addDays(day, 1)) {
 		out.push({ day, sent: 0, failed: 0 });
@@ -98,11 +104,11 @@ export function sendsByDay(ledger: Ledger, p: Period, watchSince: string | undef
 	const index = new Map(out.map((row) => [row.day, row]));
 	for (const e of Object.values(ledger.entries)) {
 		if (isSent(e)) {
-			const row = index.get(sentDay(e) ?? "");
+			const row = index.get(sentDay(e, zone) ?? "");
 			if (row) row.sent++;
 		}
 		if (isFailed(e)) {
-			const row = index.get(failedDay(e));
+			const row = index.get(failedDay(e, zone));
 			if (row) row.failed++;
 		}
 	}
@@ -110,8 +116,8 @@ export function sendsByDay(ledger: Ledger, p: Period, watchSince: string | undef
 }
 
 /** Whether the ledger covers a whole period: the plugin was watching from its first day. */
-export function ledgerReaches(watchSince: string | undefined, p: Period): boolean {
-	return Boolean(watchSince) && daysBetween(watchSince!.slice(0, 10), p.start) >= 0;
+export function ledgerReaches(watchSince: string | undefined, p: Period, zone: string): boolean {
+	return Boolean(watchSince) && daysBetween(dayOf(watchSince!, zone), p.start) >= 0;
 }
 
 export interface DayFigures {
@@ -189,9 +195,9 @@ export function channelFigures(agg: Aggregates, channelId: string, days: number)
 }
 
 /** Our posts with figures, most engaging first. */
-export function topEntries(ledger: Ledger, p: Period, limit: number): LedgerEntry[] {
+export function topEntries(ledger: Ledger, p: Period, limit: number, zone: string): LedgerEntry[] {
 	return Object.values(ledger.entries)
-		.filter((e) => isSent(e) && e.engagement !== undefined && within(sentDay(e) ?? "", p))
+		.filter((e) => isSent(e) && e.engagement !== undefined && within(sentDay(e, zone) ?? "", p))
 		.sort((a, b) => b.engagement! - a.engagement! || (b.impressions ?? -1) - (a.impressions ?? -1) || a.title.localeCompare(b.title))
 		.slice(0, limit);
 }
@@ -211,18 +217,18 @@ export interface ChannelTotals extends ChannelFigures {
  * over the same number of days. Covers the channels given and any other
  * channel the ledger has a post on in the period.
  */
-export function channelTotals(ledger: Ledger, agg: Aggregates, channelIds: string[], p: Period, days: number): ChannelTotals[] {
+export function channelTotals(ledger: Ledger, agg: Aggregates, channelIds: string[], p: Period, days: number, zone: string): ChannelTotals[] {
 	const entries = Object.values(ledger.entries);
 	const ids = new Set(channelIds);
-	for (const e of entries) if (within((isSent(e) ? sentDay(e) : e.createdAt.slice(0, 10)) ?? "", p)) ids.add(e.channelId);
+	for (const e of entries) if (within((isSent(e) ? sentDay(e, zone) : failedDay(e, zone)) ?? "", p)) ids.add(e.channelId);
 	return [...ids].map((id) => {
 		const mine = entries.filter((e) => e.channelId === id);
 		const sample = mine[0];
 		return {
 			channelId: id,
 			...(sample && { channelName: sample.channelName, service: sample.service }),
-			sent: mine.filter((e) => isSent(e) && within(sentDay(e) ?? "", p)).length,
-			failed: mine.filter((e) => isFailed(e) && within(failedDay(e), p)).length,
+			sent: mine.filter((e) => isSent(e) && within(sentDay(e, zone) ?? "", p)).length,
+			failed: mine.filter((e) => isFailed(e) && within(failedDay(e, zone), p)).length,
 			...channelFigures(agg, id, days),
 		};
 	});

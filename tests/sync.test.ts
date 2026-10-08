@@ -2,7 +2,7 @@ import type { PluginRuntimeTestHost } from "@emdash-cms/plugin-test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Delivery } from "../src/store/deliveries.js";
-import type { Aggregates, Ledger, ReportState } from "../src/store/report.js";
+import { parseAggregates, parseOrigins, type Aggregates, type Ledger, type ReportState } from "../src/store/report.js";
 import {
 	allOn,
 	channel,
@@ -34,7 +34,9 @@ import {
 	seedReport,
 	statusAnswer,
 	today,
+	ZONE,
 } from "./report-fixtures.js";
+import { dayEnd, dayStart } from "../src/time/zone.js";
 
 let host: PluginRuntimeTestHost | undefined;
 
@@ -176,8 +178,8 @@ describe("the aggregates phase", () => {
 		const [body] = sentBodies(host);
 		expect(operation(body!)).toBe("Aggregates");
 		expect(Object.keys(body!.variables)).toHaveLength(30);
-		expect(body!.variables.a0).toEqual({ organizationId: "org1", startDateTime: `${today}T00:00:00Z`, endDateTime: `${today}T23:59:59Z`, channelIds: ["c1"] });
-		expect(body!.variables.a29).toMatchObject({ startDateTime: `${dayAgo(29)}T00:00:00Z` });
+		expect(body!.variables.a0).toEqual({ organizationId: "org1", startDateTime: dayStart(today, ZONE), endDateTime: dayEnd(today, ZONE), channelIds: ["c1"] });
+		expect(body!.variables.a29).toMatchObject({ startDateTime: dayStart(dayAgo(29), ZONE) });
 
 		const agg = await row<Aggregates>(host, "aggregates");
 		expect(agg?.days.c1?.[today]).toEqual({ posts: 2, metrics: { reactions: 10, comments: 3, impressions: 500, engagementRate: 4.2 }, metricsUpdatedAt: NOW.toISOString() });
@@ -190,15 +192,15 @@ describe("the aggregates phase", () => {
 	it("a catch-up run reads the ranges and backfills older days, then hands on to the other name", async () => {
 		host = await setup({ ...nothingDue(), aggregates: undefined });
 		const recentOnly: Aggregates = { days: {}, ranges: {}, progress: { c1: { recentOn: today, backTo: dayAgo(29) } } };
-		await host.fixtures.plugin.storage("reports", "aggregates", recentOnly);
+		await host.fixtures.plugin.storage("reports", "aggregates", { zone: ZONE, ...recentOnly });
 		await respond(host, aggregatesAnswer(30, baseline(1, 4, 1)), aggregatesAnswer(30, baseline(0, 0, 0), null));
 
 		await tick(host, "catchup-a")();
 
 		const bodies = sentBodies(host);
 		expect(bodies).toHaveLength(2);
-		expect(bodies[0]!.variables.a0).toMatchObject({ startDateTime: `${dayAgo(6)}T00:00:00Z`, endDateTime: `${today}T23:59:59Z` });
-		expect(bodies[0]!.variables.a3).toMatchObject({ startDateTime: `${dayAgo(30)}T00:00:00Z`, endDateTime: `${dayAgo(30)}T23:59:59Z` });
+		expect(bodies[0]!.variables.a0).toMatchObject({ startDateTime: dayStart(dayAgo(6), ZONE), endDateTime: dayEnd(today, ZONE) });
+		expect(bodies[0]!.variables.a3).toMatchObject({ startDateTime: dayStart(dayAgo(30), ZONE), endDateTime: dayEnd(dayAgo(30), ZONE) });
 		const agg = await row<Aggregates>(host, "aggregates");
 		expect(agg?.rangesOn).toBe(today);
 		expect(agg?.ranges.c1?.["90"]).toMatchObject({ metrics: { reactions: 4, comments: 1 } });
@@ -221,6 +223,57 @@ describe("the aggregates phase", () => {
 		host.http.clear();
 		await tick(host, "sync")();
 		expect(host.http.requests()).toHaveLength(0);
+	});
+});
+
+describe("updating from 0.1.4, whose days were UTC", () => {
+	const utcRow = {
+		days: { c1: { [dayAgo(1)]: { posts: 1, metrics: { reactions: 1, impressions: 114 }, metricsUpdatedAt: NOW.toISOString() }, [dayAgo(60)]: { posts: 1, metrics: { reactions: 9 }, metricsUpdatedAt: NOW.toISOString() } } },
+		ranges: { c1: { "7": { metrics: { impressions: 114 }, metricsUpdatedAt: NOW.toISOString() } } },
+		progress: { c1: { recentOn: today, backTo: dayAgo(60) } },
+		rangesOn: today,
+	};
+
+	it("pages read the UTC-keyed rows as empty until the sync has rebuilt them", () => {
+		expect(parseAggregates(utcRow, ZONE)).toEqual({ zone: ZONE, days: {}, ranges: {}, progress: {} });
+		expect(parseAggregates({ ...utcRow, zone: ZONE }, ZONE).days.c1?.[dayAgo(1)]).toBeDefined();
+		expect(parseOrigins({ days: { c1: { [dayAgo(1)]: { unread: 1 } } }, coveredFrom: { c1: dayAgo(29) } }, ZONE)).toEqual({ zone: ZONE, days: {}, coveredFrom: {} });
+		// A changed setting rebuilds the same way.
+		expect(parseAggregates({ ...utcRow, zone: "Australia/Perth" }, ZONE).days).toEqual({});
+	});
+
+	it("the first sync drops the UTC days and reads the posts and the recent days again in the zone, inside the plan's history", async () => {
+		// 0.1.4's state: today's passes done (by UTC day) and no zone recorded.
+		const { dayZone: _zone, ...old } = nothingDue();
+		host = await setup({ ...old, insightsHistory: { days: 31, learntAt: NOW.toISOString() } });
+		await host.fixtures.plugin.storage("reports", "aggregates", utcRow);
+		await respond(host, metricsAnswer([]), aggregatesAnswer(30, baseline(1, 2, 0)));
+
+		await tick(host, "sync")();
+
+		expect(sentBodies(host).map(operation)).toEqual(["SentPostMetrics", "Aggregates"]);
+		const [metricsBody, aggregatesBody] = sentBodies(host);
+		const input = metricsBody!.variables.input as { filter: { createdAt: { start: string } } };
+		expect(input.filter.createdAt.start).toBe(dayStart(dayAgo(30), ZONE));
+		expect(aggregatesBody!.variables.a0).toMatchObject({ startDateTime: dayStart(today, ZONE), endDateTime: dayEnd(today, ZONE) });
+
+		const state = await report(host);
+		expect(state.dayZone).toBe(ZONE);
+		expect(state.insightsHistory?.days).toBe(31);
+		const agg = await row<Aggregates>(host, "aggregates");
+		expect(agg?.zone).toBe(ZONE);
+		// The day beyond the Free plan's 31 days cannot be read again, so it goes.
+		expect(agg?.days.c1?.[dayAgo(60)]).toBeUndefined();
+		expect(agg?.days.c1?.[dayAgo(1)]).toMatchObject({ posts: 1, metrics: { reactions: 2 } });
+		expect(agg?.progress.c1).toEqual({ recentOn: today, backTo: dayAgo(29) });
+		expect(agg?.ranges).toEqual({});
+
+		// The next sync carries on (ranges, then the origins pass) and does not drop anything again.
+		host.http.clear();
+		await respond(host, aggregatesAnswer(3, baseline(1, 2, 0)));
+		await tick(host, "sync")();
+		expect((await row<Aggregates>(host, "aggregates"))?.days.c1?.[dayAgo(1)]).toBeDefined();
+		expect((await report(host)).dayZone).toBe(ZONE);
 	});
 });
 
@@ -335,7 +388,7 @@ describe("the shared-bucket guard", () => {
 		host = await setup({ ...nothingDue(), aggregates: undefined });
 		await seedState(host, { watchSince: NOW.toISOString(), rateLimit: reading(90, 120, 2500) });
 		const recentDone: Aggregates = { days: {}, ranges: {}, progress: { c1: { recentOn: today, backTo: dayAgo(29) } }, rangesOn: today };
-		await host.fixtures.plugin.storage("reports", "aggregates", recentDone);
+		await host.fixtures.plugin.storage("reports", "aggregates", { zone: ZONE, ...recentDone });
 
 		await tick(host, "catchup-a")();
 

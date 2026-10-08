@@ -136,6 +136,16 @@
 				"min": 10,
 				"max": 75,
 				"description": "Percent, 10 to 75. Buffer counts every API key and connected assistant on your account against one shared limit. The plugin's background reports stop while less than this share of Buffer's daily and 30-day limits is left. Posts still go out."
+			},
+			// EmDash gives a sandboxed plugin no site time zone (ctx.site has
+			// name, URL, locale and trailingSlash only), so the reports' days
+			// take theirs from here. src/time/zone.ts checks the name with
+			// Intl.DateTimeFormat and falls back to the default.
+			"timeZone": {
+				"type": "string",
+				"label": "Time zone",
+				"default": "Australia/Sydney",
+				"description": "An IANA time zone name, such as Australia/Sydney, Australia/Perth or Europe/London. The reports count each post on its day in this zone, and \"today\" and every range end at its midnight. A name the server does not recognise falls back to Australia/Sydney. Changing it rebuilds the daily figures from Buffer within your plan's history."
 			}
 		},
 
@@ -154,7 +164,7 @@
 
 	// The registry page's tabs. Profile-level: they carry across releases.
 	// Each file is capped at 20000 bytes and 2000 graphemes
-	// (tests/sections.test.ts checks both).
+	// (tests/docs.test.ts checks both).
 	"sections": {
 		"description": { "file": "docs/registry/description.md" },
 		"installation": { "file": "docs/registry/installation.md" },

@@ -43,6 +43,7 @@ import {
 	type FormField,
 	type PageBlock,
 } from "./blocks.js";
+import { dayOf, isDay } from "../time/zone.js";
 import { formatTime } from "./format.js";
 
 /** A collection as `ctx.schema.listCollections()` describes it. */
@@ -95,9 +96,10 @@ export async function loadCollectionsAndFailures(ctx: PluginContext): Promise<{ 
 /**
  * The snapshot rows the analytics view and the widget read, in one call.
  */
-export async function loadSnapshots(ctx: PluginContext): Promise<{ ledger: Ledger; aggregates: Aggregates; origins: Origins }> {
+export async function loadSnapshots(ctx: PluginContext, zone: string): Promise<{ ledger: Ledger; aggregates: Aggregates; origins: Origins }> {
 	const rows = await ctx.storage[REPORTS]!.getMany([LEDGER_ID, AGGREGATES_ID, ORIGINS_ID]);
-	return { ledger: parseLedger(rows.get(LEDGER_ID)), aggregates: parseAggregates(rows.get(AGGREGATES_ID)), origins: parseOrigins(rows.get(ORIGINS_ID)) };
+	// Rows keyed in another zone (UTC, before 0.1.5) read as empty until the sync rebuilds them.
+	return { ledger: parseLedger(rows.get(LEDGER_ID)), aggregates: parseAggregates(rows.get(AGGREGATES_ID), zone), origins: parseOrigins(rows.get(ORIGINS_ID), zone) };
 }
 
 export function renderSetup(input: PageInput): PageBlock[] {
@@ -111,7 +113,7 @@ export function renderSetup(input: PageInput): PageBlock[] {
 	blocks.push(...setupSection(input));
 
 	if (stored.state.watchSince) {
-		blocks.push(context(t(lang, "watchingSince", { date: day(stored.state.watchSince) })));
+		blocks.push(context(t(lang, "watchingSince", { date: day(stored.state.watchSince, settings.timeZone) })));
 	}
 	return blocks;
 }
@@ -131,11 +133,11 @@ function setupSection(input: PageInput): PageBlock[] {
 	}
 
 	blocks.push(header(t(lang, "channelsHeader")));
-	if (cache?.fetchedAt) blocks.push(context(t(lang, "channelsFetched", { date: day(cache.fetchedAt) })));
+	if (cache?.fetchedAt) blocks.push(context(t(lang, "channelsFetched", { date: day(cache.fetchedAt, settings.timeZone) })));
 	if (cache?.truncated) blocks.push(context(t(lang, "channelsTruncated", { count: cache.organizations.length })));
 	// Where each rule comes from, and when Buffer's configuration was read with the channels.
 	if (cache?.fetchedAt) {
-		const time = formatTime(cache.fetchedAt, lang);
+		const time = formatTime(cache.fetchedAt, lang, settings.timeZone);
 		if (cache.hintsNote) blocks.push(context(t(lang, "hintsUnavailable", { message: cache.hintsNote, time })));
 		else if (cache.hints && Object.keys(cache.hints).length > 0) blocks.push(context(t(lang, "hintsFromBuffer", { time })));
 		else blocks.push(context(t(lang, "hintsNone", { time })));
@@ -172,7 +174,7 @@ function setupSection(input: PageInput): PageBlock[] {
 		if (canManage) blocks.push(actions([button(RETRY_ACTION, t(lang, "retry"))]));
 	}
 	const until = headroomPausedUntil(settings, stored, input.now);
-	if (until) blocks.push(banner({ description: t(lang, "headroomPaused", { time: formatTime(until, lang) }), variant: "alert" }));
+	if (until) blocks.push(banner({ description: t(lang, "headroomPaused", { time: formatTime(until, lang, settings.timeZone) }), variant: "alert" }));
 	// The newest reading from a delivery, a discovery or a report run.
 	const rate = latestRateLimit(stored);
 	if (rate) {
@@ -337,8 +339,9 @@ export function collectionsFromForm(
 	return out;
 }
 
-function day(iso: string): string {
-	return iso.slice(0, 10);
+/** A moment as its day in the zone, `YYYY-MM-DD`. A value that is already a day is kept. */
+function day(iso: string, zone: string): string {
+	return isDay(iso) || Number.isNaN(Date.parse(iso)) ? iso : dayOf(iso, zone);
 }
 
 /**
@@ -359,5 +362,5 @@ export function originsLine(input: Pick<PageInput, "lang" | "stored" | "settings
 		const name = c.displayName || c.name;
 		return [t(lang, row.method === "listed" ? "originListed" : "originDerived", { name, ...row.counts })];
 	});
-	return list.length > 0 ? t(lang, "originsSince", { date: day(summary.since), list: list.join("; ") }) : t(lang, "originsNotRead");
+	return list.length > 0 ? t(lang, "originsSince", { date: day(summary.since, input.settings.timeZone), list: list.join("; ") }) : t(lang, "originsNotRead");
 }

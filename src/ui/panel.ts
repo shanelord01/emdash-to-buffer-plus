@@ -184,7 +184,7 @@ export async function handlePanel(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 
 	let blocks: PageBlock[];
 	if (records.length > 0) {
-		blocks = renderDeliveries({ lang, records, canManage });
+		blocks = renderDeliveries({ lang, records, canManage, zone: settings.timeZone });
 	} else if (publishedBeforeWatch(await loadItem(), stored.state.watchSince)) {
 		blocks = canManage
 			? renderBeforeWatch({ lang, settings, stored, override: await loadOverride() })
@@ -387,7 +387,7 @@ export function renderBeforeSend(input: { lang: Lang; settings: PluginSettings; 
 		out.push(context(t(lang, "panelBeforeHelp")));
 	}
 	for (const line of blocked) out.push(context(line));
-	if (stored.state.watchSince) out.push(context(t(lang, "panelWatchNote", { date: formatTime(stored.state.watchSince, lang) })));
+	if (stored.state.watchSince) out.push(context(t(lang, "panelWatchNote", { date: formatTime(stored.state.watchSince, lang, settings.timeZone) })));
 	out.push(pageLink(lang));
 	return out;
 }
@@ -436,13 +436,13 @@ function latestByChannel(records: Row[]): Map<string, { row: Row; count: number 
 	return out;
 }
 
-export function renderDeliveries(input: { lang: Lang; records: Row[]; canManage: boolean }): PageBlock[] {
+export function renderDeliveries(input: { lang: Lang; records: Row[]; canManage: boolean; zone: string }): PageBlock[] {
 	const { lang, records, canManage } = input;
 	const out: PageBlock[] = [];
 	const latest = [...latestByChannel(records).values()].sort((a, b) => a.row.data.channelName.localeCompare(b.row.data.channelName));
 	for (const { row, count } of latest) {
 		const d = row.data;
-		out.push(section(t(lang, "panelChannelLine", { name: d.channelName, service: d.service, state: stateText(d, lang) }), { blockId: `buffer:panel:${d.channelId}` }));
+		out.push(section(t(lang, "panelChannelLine", { name: d.channelName, service: d.service, state: stateText(d, lang, input.zone) }), { blockId: `buffer:panel:${d.channelId}` }));
 		const detail = detailText(d, lang);
 		const notes = [...(d.origin === "manual" ? [t(lang, "panelSharedByHand")] : []), ...(detail ? [detail] : []), ...(count > 1 ? [t(lang, "panelSentCount", { count })] : [])];
 		if (notes.length > 0) out.push(context(notes.join(" ")));
@@ -461,11 +461,11 @@ export function renderDeliveries(input: { lang: Lang; records: Row[]; canManage:
 	return out;
 }
 
-/** What happened to a delivery, in a few words. */
-export function stateText(d: Delivery, lang: Lang): string {
+/** What happened to a delivery, in a few words, with its times in the zone. */
+export function stateText(d: Delivery, lang: Lang, zone: string): string {
 	switch (d.status) {
 		case "pending":
-			return d.nextAttemptAt ? t(lang, "panelStatePendingAt", { time: formatTime(d.nextAttemptAt, lang) }) : t(lang, "panelStatePending");
+			return d.nextAttemptAt ? t(lang, "panelStatePendingAt", { time: formatTime(d.nextAttemptAt, lang, zone) }) : t(lang, "panelStatePending");
 		case "sending":
 			return t(lang, "panelStateSending");
 		case "unknown":
@@ -479,7 +479,7 @@ export function stateText(d: Delivery, lang: Lang): string {
 	}
 	switch (d.postStatus) {
 		case "sent":
-			return d.sentAt ? t(lang, "panelStatePosted", { time: formatTime(d.sentAt, lang) }) : t(lang, "panelStatePostedNoTime");
+			return d.sentAt ? t(lang, "panelStatePosted", { time: formatTime(d.sentAt, lang, zone) }) : t(lang, "panelStatePostedNoTime");
 		case "draft":
 			return t(lang, "panelStateDraft");
 		case "needs_approval":
@@ -491,7 +491,7 @@ export function stateText(d: Delivery, lang: Lang): string {
 		case POST_NOT_FOUND:
 			return t(lang, "panelStateGone");
 		default:
-			return d.dueAt ? t(lang, "panelStateQueued", { time: formatTime(d.dueAt, lang) }) : t(lang, "panelStateAccepted");
+			return d.dueAt ? t(lang, "panelStateQueued", { time: formatTime(d.dueAt, lang, zone) }) : t(lang, "panelStateAccepted");
 	}
 }
 

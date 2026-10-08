@@ -47,7 +47,7 @@ import { readSettings } from "../settings.js";
 import { DELIVERIES } from "../store/deliveries.js";
 import { readStored } from "../store/kv.js";
 import { OVERRIDES } from "../store/overrides.js";
-import { REPORT_KEY, type ReportState } from "../store/report.js";
+import { REPORT_KEY, settleDayZone, type ReportState } from "../store/report.js";
 import { aggregatesDue, AGGREGATES_COST, runAggregatesPhase } from "./aggregates.js";
 import { refreshChannels } from "./channels.js";
 import { bufferClient, headroom, isDue, observe, paused, RUN_RESERVE, settleHeadroom, type PhaseContext } from "./common.js";
@@ -102,6 +102,10 @@ export async function runSync(rawCtx: PluginContext, task: SyncTask = SYNC_TASK,
 	// 0.1.1 showed Buffer's history limit as a failed check. It is not one,
 	// and the reads now keep to it (src/buffer/history.ts).
 	if (historyLimitDays(report.problem?.message) !== null) delete report.problem;
+	// Days kept in another zone (UTC before 0.1.5, or a changed "Time zone"
+	// setting) are dropped, so the metrics and aggregates phases are due now
+	// and rebuild them. Costs no bridge call: the state is written at the end.
+	settleDayZone(report, settings.timeZone);
 	const chained = task !== SYNC_TASK;
 
 	const p: PhaseContext = { ctx, meter, settings, stored, client: bufferClient(ctx, settings), now, report };

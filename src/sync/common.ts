@@ -67,7 +67,8 @@ export function refusalOf(result: Extract<BufferResult<unknown>, { ok: false }>)
  *
  * A refusal of a request already cut to the known limit means Buffer
  * counts the days a little differently from this plugin (its day may start
- * in the organisation's time zone, not UTC), so the limit is taken one day
+ * in the organisation's time zone, not the plugin's "Time zone" setting),
+ * so the limit is taken one day
  * shorter rather than asked for again and refused again.
  */
 export function learnHistory(p: PhaseContext, days: number): void {
