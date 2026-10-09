@@ -1,3 +1,5 @@
+An unofficial plugin. It is not affiliated with, endorsed by or supported by Buffer.
+
 Shares new entries to your Buffer channels, fitted to each network, with delivery tracking, an engagement dashboard, an editor panel and MCP tools.
 
 - **Every network Buffer's API can post to.** Text is fitted to each network's limit, only the description is shortened, and each post carries the entry's image or a link card where Buffer supports one.
@@ -8,4 +10,4 @@ Shares new entries to your Buffer channels, fitted to each network, with deliver
 
 Only entries first published after you install the plugin are shared, and republishing never sends again.
 
-The plugin uses the Buffer API with your personal API key. It is not affiliated with Buffer.
+The plugin uses the Buffer API with your personal API key.

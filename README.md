@@ -1,13 +1,14 @@
 # EmDash to Buffer Plus
 
+An unofficial plugin. It is not affiliated with, endorsed by or supported by Buffer.
+
 Shares new EmDash entries to your Buffer channels, fitted to each
 network, with delivery tracking, an engagement dashboard, an editor panel
 and MCP tools. Each post carries the entry's image or a link card, every
 delivery is followed from your site to the live post, and the Buffer Plus
 page and dashboard card show how each post did.
 
-The plugin uses the Buffer API with a personal API key. It is not made,
-endorsed or supported by Buffer.
+The plugin uses the Buffer API with a personal API key.
 
 Tested with the EmDash test host and Buffer's documented API. It has not
 yet been run against a live Buffer account on every network: LinkedIn,

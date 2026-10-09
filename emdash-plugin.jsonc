@@ -36,7 +36,7 @@
 
 	// The registry refuses a description over 140 graphemes;
 	// `emdash-plugin validate` does not check it. At most five keywords.
-	"description": "Share new entries to Buffer, fitted to each network, with delivery tracking, an engagement dashboard, an editor panel and MCP tools.",
+	"description": "Unofficial, not affiliated with Buffer: share new entries to Buffer, fitted to each network, with delivery tracking and reports.",
 	"keywords": ["buffer", "social", "syndication", "sharing", "publishing"],
 
 	// Trust contract: exactly what the code calls.
