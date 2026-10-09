@@ -39,9 +39,9 @@ import type { AttachMode } from "../buffer/services.js";
 import {
 	ANALYTICS_ACTION,
 	DEFAULT_RANGE,
+	isRangeAction,
 	PAGE_REFRESH_ACTION,
-	parseRange,
-	RANGE_ACTION,
+	rangeOf,
 	renderAnalytics,
 	RETRY_ALL_ACTION,
 	SETUP_ACTION,
@@ -104,7 +104,7 @@ export async function handleAdmin(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 
 	const setupActions = [DISCOVER_ACTION, RETRY_ACTION, SETUP_ACTION];
 	const setupView = (isAction && setupActions.includes(actionId)) || isSubmit;
-	const range = parseRange(input.value);
+	const range = rangeOf(actionId, input.value);
 
 	if (setupView) return await setupPage(ctx, { lang, settings, stored, canManage, actionId, isAction, isSubmit, values, range: isAction ? range : DEFAULT_RANGE, now });
 
@@ -113,7 +113,7 @@ export async function handleAdmin(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 		toast = canManage ? await retry(ctx, stored, lang, now) : { message: t(lang, "forbidden"), type: "error" };
 	} else if (isAction && actionId === PAGE_REFRESH_ACTION) {
 		toast = await refresh(ctx, lang, now);
-	} else if (!isAction || (actionId !== RANGE_ACTION && actionId !== ANALYTICS_ACTION)) {
+	} else if (!isAction || (!isRangeAction(actionId) && actionId !== ANALYTICS_ACTION)) {
 		await ensureScheduled(ctx, settings.syncInterval, offset);
 	}
 

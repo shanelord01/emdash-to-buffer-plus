@@ -204,6 +204,29 @@ describe("after the entry went to Buffer", () => {
 		expect(text(response)).toContain("queued in Buffer for 4 Oct 2026, 11:00 am AEDT");
 	});
 
+	it("offers no Send again while the post is queued, sending, a draft or waiting for approval at Buffer, or not read yet", async () => {
+		const { runtime, id } = await setup();
+		host = runtime;
+		for (const postStatus of ["scheduled", "sending", "draft", "needs_approval", undefined]) {
+			await seedDelivery(host, `posts:${id}:c1`, { entryId: id, status: "sent", postId: "p1", ...(postStatus && { postStatus }) });
+			const response = await host.admin.loadEditorPanel(PANEL_ID, "posts", id);
+			expect(find(response.blocks, "button").map((b) => b.action_id), String(postStatus)).not.toContain(PANEL_AGAIN_ACTION);
+			const refused = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:c1` });
+			expect(refused.toast, String(postStatus)).toMatchObject({ type: "error" });
+		}
+		expect(host.http.requests()).toHaveLength(0);
+	});
+
+	it("offers Send again once Buffer could not publish the post, or it is no longer in Buffer", async () => {
+		const { runtime, id } = await setup();
+		host = runtime;
+		for (const postStatus of ["error", "notFound"]) {
+			await seedDelivery(host, `posts:${id}:c1`, { entryId: id, status: "sent", postId: "p1", postStatus });
+			const response = await host.admin.loadEditorPanel(PANEL_ID, "posts", id);
+			expect(find(response.blocks, "button").map((b) => b.action_id), postStatus).toContain(PANEL_AGAIN_ACTION);
+		}
+	});
+
 	it("gives editors the states without Retry or Send again, and refuses the actions", async () => {
 		const { runtime, id } = await sent();
 		host = runtime;
@@ -456,5 +479,92 @@ describe("an entry published before the plugin started watching", () => {
 			expect(String(response.toast?.message)).toContain("only for entries published before the plugin started watching");
 		}
 		expect(await deliveries(host)).toHaveLength(0);
+	});
+});
+
+describe("an Instagram channel and an image Instagram cannot take", () => {
+	const IG = channel("ig", "instagram", { displayName: "My Instagram" });
+	const KEY = "01M3QY3VKJAWMFNS7TH6JHSA8W.jpg";
+	const cover = (width: number, height: number) => ({ id: "m1", provider: "local", alt: "A road", width, height, meta: { storageKey: KEY } });
+
+	async function igSetup(size: [number, number]) {
+		const runtime = await newHost();
+		await postsCollection(runtime);
+		await seedChannels(runtime, [LI, IG]);
+		await seedConfig(runtime, { channels: allOn([LI, IG]), collections: { posts: { enabled: true, image: "cover", titleField: "title" } } });
+		await seedState(runtime, watching);
+		const post = await publishedPost(runtime, { cover: cover(...size) });
+		return { runtime, ...post };
+	}
+
+	it("warns before the first share that Instagram will skip the entry, naming the shape", async () => {
+		const { runtime, id } = await igSetup([3000, 1000]);
+		host = runtime;
+		const response = await host.admin.loadEditorPanel(PANEL_ID, "posts", id);
+		expectValid(response);
+		expect(find(response.blocks, "banner").map((b) => b.title)).toEqual([
+			"My Instagram (instagram) will skip this entry: its image is 3:1. Instagram accepts 4:5 (tall) to 1.91:1 (wide).",
+		]);
+	});
+
+	it("gives no warning for a shape Instagram takes, or when Instagram is left out", async () => {
+		const fits = await igSetup([1024, 768]);
+		host = fits.runtime;
+		expect(find((await host.admin.loadEditorPanel(PANEL_ID, "posts", fits.id)).blocks, "banner")).toHaveLength(0);
+		await host.dispose();
+
+		const { runtime, id } = await igSetup([3000, 1000]);
+		host = runtime;
+		const saved = await host.admin.submitEditorPanel(PANEL_ID, "posts", id, PANEL_SAVE_ACTION, { send_c1: true, send_ig: false });
+		expect(find(saved.blocks, "banner")).toHaveLength(0);
+	});
+
+	it("publishing skips Instagram without asking Buffer, sends the rest, and the panel says why with the shape", async () => {
+		const { runtime, id, event } = await igSetup([1024, 536]);
+		host = runtime;
+		await respond(host, created("p1"));
+		await host.transport.invokeHook("content:afterPublish", event);
+
+		const bodies = sentBodies(host);
+		expect(bodies.map((b) => (b.variables.input as Record<string, unknown>).channelId)).toEqual(["c1"]);
+		const ig = (await deliveries(host)).find((d) => d.channelId === "ig");
+		expect(ig).toMatchObject({ status: "skipped", reason: "imageAspect", imageWidth: 1024, imageHeight: 536 });
+
+		const response = await host.admin.loadEditorPanel(PANEL_ID, "posts", id);
+		expectValid(response);
+		expect(text(response)).toContain("The image is 1.9104:1. Instagram accepts 4:5 (tall) to 1.91:1 (wide). Choose a differently shaped image, publish the change, then use Send again.");
+		const again = find(response.blocks, "button").filter((b) => b.action_id === PANEL_AGAIN_ACTION).map((b) => b.value);
+		expect(again).toEqual([`posts:${id}:ig`]);
+	});
+
+	it("Send again checks the shape again: refused while the image is unchanged, sent once it is", async () => {
+		const { runtime, id } = await igSetup([3000, 1000]);
+		host = runtime;
+		await seedDelivery(host, `posts:${id}:ig`, {
+			entryId: id,
+			channelId: "ig",
+			channelName: "My Instagram",
+			service: "instagram",
+			status: "skipped",
+			reason: "imageAspect",
+			imageUrl: `https://www.example.com/_emdash/api/media/file/${KEY}`,
+			imageAlt: "A road",
+			imageWidth: 3000,
+			imageHeight: 1000,
+		});
+
+		const refused = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:ig` });
+		expect(refused.toast).toMatchObject({ type: "error", message: expect.stringContaining("The image is 3:1.") });
+		expect(host.http.requests()).toHaveLength(0);
+
+		// An edit is a draft until it is published: Send again reads the published entry.
+		await host.actions.content.update("posts", id, { data: { cover: cover(1080, 1350) } });
+		await host.actions.content.publish("posts", id);
+		await respond(host, created("p9"));
+		const sent = await host.admin.actEditorPanel(PANEL_ID, "posts", id, PANEL_AGAIN_CONFIRM_ACTION, { value: `posts:${id}:ig` });
+		expect(sent.toast).toMatchObject({ type: "success" });
+		const input = sentBodies(host)[0]!.variables.input as { channelId: string; assets: Array<{ image: { url: string } }> };
+		expect(input.channelId).toBe("ig");
+		expect(input.assets[0]!.image.url).toBe(`https://www.example.com/_emdash/api/media/file/${KEY}`);
 	});
 });

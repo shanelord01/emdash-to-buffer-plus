@@ -30,6 +30,7 @@ import { readSettings, type PluginSettings } from "../settings.js";
 import { DELIVERIES, deliveryId, isDue, OPEN_STATUSES, UNKNOWN_GIVE_UP_MS, type Delivery } from "../store/deliveries.js";
 import { readStored, STATE_KEY, storedReadings, type PluginState, type Stored } from "../store/kv.js";
 import { OVERRIDES, overrideId, parseOverride } from "../store/overrides.js";
+import { shapeProblem } from "./aspect.js";
 import { metered, type Meter } from "./budget.js";
 import { isSignedInMediaUrl, resolveImage } from "./image.js";
 import { entryFromEvent, imageSourceOf, prepareDeliveries, type EntryRef } from "./prepare.js";
@@ -102,7 +103,12 @@ export function needsImageRepair(row: Delivery): boolean {
  * for the other records of the same entry. When there is no public address,
  * or the entry cannot be read, the record goes without the image and says
  * why in `imageIssue`, and a network that needs an image is skipped as a new
- * record would be (`needsImage`).
+ * record would be (`needsImage`). An Instagram record whose image is known
+ * to be outside 4:5 to 1.91:1 is skipped as `imageAspect`, as a new record
+ * would be (`./aspect.ts`).
+ *
+ * Send again of an Instagram record goes through here too, so a record
+ * skipped for the image's shape is sent once the entry's image is changed.
  */
 export async function repairImage(ctx: PluginContext, stored: Stored, row: Delivery, entries: Map<string, EntryItem>): Promise<Delivery> {
 	const key = `${row.collection}:${row.entryId}`;
@@ -122,7 +128,17 @@ export async function repairImage(ctx: PluginContext, stored: Stored, row: Deliv
 	delete out.imageUrl;
 	delete out.imageAlt;
 	delete out.imageIssue;
-	if (image?.ok && rule.image !== "never") return { ...out, imageUrl: image.url, imageAlt: image.alt };
+	delete out.imageWidth;
+	delete out.imageHeight;
+	if (image?.ok && rule.image !== "never") {
+		const shape = shapeProblem(row.service, image);
+		if (shape) {
+			delete out.error;
+			delete out.errorKind;
+			return { ...out, imageUrl: image.url, imageAlt: image.alt, status: "skipped", reason: "imageAspect", nextAttemptAt: "", imageWidth: shape.width, imageHeight: shape.height };
+		}
+		return { ...out, imageUrl: image.url, imageAlt: image.alt };
+	}
 	if (rule.image === "needed") {
 		delete out.error;
 		delete out.errorKind;

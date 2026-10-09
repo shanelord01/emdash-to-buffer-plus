@@ -28,14 +28,14 @@ function fakeCtx(opts: { publicUrl?: string | null; image?: boolean } = {}): Plu
 	} as unknown as PluginContext;
 }
 
-function entry(excerpt = "A short excerpt."): EntryRef {
+function entry(excerpt = "A short excerpt.", cover: Record<string, unknown> = {}): EntryRef {
 	return {
 		collection: "posts",
 		id: "e1",
 		status: "published",
 		publishedAt: NOW.toISOString(),
 		slug: "hello",
-		data: { title: "Hello world", excerpt, cover: { id: "m1", provider: "local", alt: "A road", meta: { storageKey: "k1.jpg" } } },
+		data: { title: "Hello world", excerpt, cover: { id: "m1", provider: "local", alt: "A road", meta: { storageKey: "k1.jpg" }, ...cover } },
 	};
 }
 
@@ -57,7 +57,15 @@ function chan(service: string, extra: Partial<BufferChannel> = {}): BufferChanne
 async function prepare(
 	channel: BufferChannel,
 	cfg: Partial<ChannelConfig> = {},
-	opts: { excerpt?: string; publicUrl?: string | null; image?: boolean; hints?: ChannelHints; template?: string; overrides?: { skip?: string[]; text?: Record<string, string> } } = {},
+	opts: {
+		excerpt?: string;
+		publicUrl?: string | null;
+		image?: boolean;
+		hints?: ChannelHints;
+		template?: string;
+		overrides?: { skip?: string[]; text?: Record<string, string> };
+		cover?: Record<string, unknown>;
+	} = {},
 ): Promise<Delivery> {
 	const config: PluginConfig = {
 		...emptyConfig(),
@@ -73,7 +81,7 @@ async function prepare(
 	};
 	const settings = parseSettings(new Map(opts.template ? [["defaultTemplate", opts.template]] : []));
 	const rows = await prepareDeliveries(fakeCtx(opts), {
-		entry: entry(opts.excerpt),
+		entry: entry(opts.excerpt, opts.cover),
 		settings,
 		config,
 		channels: cache,
@@ -222,6 +230,7 @@ describe("every skip reason", () => {
 		["textTooLong", () => prepare(chan("twitter"), {}, { template: `${"T".repeat(300)} {url}` })],
 		["noUrl", () => prepare(chan("linkedin"), {}, { publicUrl: null })],
 		["editorSkipped", () => prepare(chan("linkedin"), {}, { overrides: { skip: ["ch-linkedin"] } })],
+		["imageAspect", () => prepare(chan("instagram"), {}, { cover: { width: 3000, height: 1000 } })],
 	];
 
 	it("covers the whole list", () => {
@@ -232,7 +241,9 @@ describe("every skip reason", () => {
 		it(reason, async () => {
 			const row = await run();
 			expect(row).toMatchObject({ status: "skipped", reason });
-			expect(row.text).toBe("");
+			// A shape skip keeps the prepared post, for Send again once the image is changed.
+			if (reason === "imageAspect") expect(row.text).toBe(TEXT);
+			else expect(row.text).toBe("");
 		});
 	}
 
@@ -300,5 +311,46 @@ describe("configuration hints", () => {
 
 	it("no hints means the documented rule, marked as such", () => {
 		expect(ruleFor("bluesky").origin).toEqual({ image: "documented", linkCard: "documented", limit: "documented", text: "documented" });
+	});
+});
+
+describe("Instagram's image shape", () => {
+	it("skips Instagram up front for a known shape outside 4:5 to 1.91:1, keeping the post and the image's size", async () => {
+		const row = await prepare(chan("instagram"), {}, { cover: { width: 3000, height: 600 } });
+		expect(row).toMatchObject({ status: "skipped", reason: "imageAspect", imageWidth: 3000, imageHeight: 600, imageUrl: IMAGE_URL, url: `${SITE}/blog/hello` });
+	});
+
+	it("reads the size from meta as well", async () => {
+		const row = await prepare(chan("instagram"), {}, { cover: { meta: { storageKey: "k1.jpg", width: 600, height: 2000 } } });
+		expect(row).toMatchObject({ status: "skipped", reason: "imageAspect", imageWidth: 600, imageHeight: 2000 });
+	});
+
+	it("1024x536 is 1.9104:1 and skipped; 1023x536 and the exact edges are sent", async () => {
+		expect(await prepare(chan("instagram"), {}, { cover: { width: 1024, height: 536 } })).toMatchObject({ status: "skipped", reason: "imageAspect" });
+		for (const [width, height] of [[1023, 536], [382, 200], [800, 1000], [1080, 1350], [1024, 768]] as const) {
+			const row = await prepare(chan("instagram"), {}, { cover: { width, height } });
+			expect(row.status, `${width}x${height}`).toBe("pending");
+			expect(createInput(row).assets).toEqual([{ image: { url: IMAGE_URL, metadata: { altText: "A road" } } }]);
+		}
+	});
+
+	it("sends as before when the size is unknown, or not whole numbers", async () => {
+		expect((await prepare(chan("instagram"))).status).toBe("pending");
+		expect((await prepare(chan("instagram"), {}, { cover: { width: 3000 } })).status).toBe("pending");
+		expect((await prepare(chan("instagram"), {}, { cover: { width: "3000", height: "600" } })).status).toBe("pending");
+		expect((await prepare(chan("instagram"), {}, { cover: { width: 3000.5, height: 600 } })).status).toBe("pending");
+	});
+
+	it("leaves every other network alone", async () => {
+		for (const service of ["facebook", "threads", "bluesky", "linkedin", "tiktok"]) {
+			const row = await prepare(chan(service), {}, { cover: { width: 3000, height: 600 } });
+			expect(row.reason, service).not.toBe("imageAspect");
+			expect(row.imageUrl, service).toBe(IMAGE_URL);
+		}
+	});
+
+	it("leaves an Instagram channel alone when Buffer's configuration says it takes no image", async () => {
+		const row = await prepare(chan("instagram"), {}, { cover: { width: 3000, height: 600 }, hints: { image: false } });
+		expect(row.reason).not.toBe("imageAspect");
 	});
 });

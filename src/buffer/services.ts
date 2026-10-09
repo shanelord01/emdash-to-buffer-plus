@@ -40,7 +40,9 @@ export type SkipReason =
 	| "textTooLong"
 	| "noUrl"
 	/** Left out for this one entry in the editor panel. */
-	| "editorSkipped";
+	| "editorSkipped"
+	/** Instagram: the image is outside 4:5 to 1.91:1 and was not cropped (`src/publish/crop.ts`). */
+	| "imageAspect";
 
 export const SKIP_REASONS: readonly SkipReason[] = [
 	"serviceUnsupported",
@@ -52,7 +54,17 @@ export const SKIP_REASONS: readonly SkipReason[] = [
 	"textTooLong",
 	"noUrl",
 	"editorSkipped",
+	"imageAspect",
 ];
+
+/**
+ * The reasons `channel_health` can give for a blocked channel, in its MCP
+ * output schema. A channel is blocked only by `channelBlocker`, so the
+ * image shape reasons, which belong to one entry, can never be among them.
+ * They stay out of the schema so it is the one 0.1.5 declared: a changed
+ * tool output turns Agent access off on update.
+ */
+export const BLOCKED_REASONS: readonly SkipReason[] = SKIP_REASONS.filter((r) => r !== "imageAspect");
 
 /** How a service counts post text (character-limits.md, How Buffer counts characters). */
 export type CountRule =

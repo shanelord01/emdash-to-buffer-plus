@@ -209,7 +209,22 @@ export interface DailySeries {
 	data: Array<number | null>;
 	/** A fixed colour ("#4290F0"), so a series keeps it on every chart. Without one, ECharts picks by position. */
 	colour?: string;
+	/** A line chart's line: solid (ECharts' default), dashed or dotted. */
+	line?: LineType;
+	/** A line chart's point marker. Circle is ECharts' default. */
+	marker?: Marker;
 }
+
+/** ECharts `lineStyle.type` values. The host's sanitiser keeps `lineStyle` whole. */
+export const LINE_TYPES = ["solid", "dashed", "dotted"] as const;
+export type LineType = (typeof LINE_TYPES)[number];
+
+/**
+ * ECharts' built-in point markers, circle first. A larger marker than the
+ * usual 4 px circle is drawn for the others, so the shape can be seen.
+ */
+export const MARKERS = ["circle", "rect", "triangle", "diamond", "pin", "arrow"] as const;
+export type Marker = (typeof MARKERS)[number];
 
 /**
  * The host's categorical chart palette in light mode, in kumo's order
@@ -219,6 +234,46 @@ export interface DailySeries {
  * host's palette in both modes.
  */
 export const CHART_COLOURS = ["#4290F0", "#F5B647", "#E8649D", "#8D58EE", "#50C3B6", "#D37536"] as const;
+
+/**
+ * Colours for lines past the host palette's six, chosen far from its hues
+ * (blue 213, amber 38, pink 334, purple 263, teal 173 and orange 24
+ * degrees) and from each other: green (122), red (356), olive (66) and
+ * grey. Each reads against kumo's light and dark backgrounds.
+ */
+export const EXTRA_COLOURS = ["#3A9C3E", "#C8323C", "#8A9A1B", "#7D8590"] as const;
+
+/** Every line colour, the host palette first. */
+export const SERIES_COLOURS = [...CHART_COLOURS, ...EXTRA_COLOURS] as const;
+
+/**
+ * Each line colour's name, in the same order, as a message key. EmDash
+ * registers no ECharts legend component (@emdash-cms/blocks 1.1.0 and
+ * 1.2.0 `echarts.use`: bar, line, pie, aria, axis pointer, grid, tooltip),
+ * so a `legend` option would draw nothing. The page names each line and
+ * its colour in a line of text under the chart instead. Kumo calls
+ * #F5B647 Yellow, but its hue (38 degrees) sits between yellow (60) and
+ * the palette's orange #D37536 (24), so it is named amber: "yellow" beside
+ * "orange" for two orange-looking lines would mislead.
+ */
+export const SERIES_COLOUR_NAMES = [
+	"colourBlue",
+	"colourAmber",
+	"colourPink",
+	"colourPurple",
+	"colourTeal",
+	"colourOrange",
+	"colourGreen",
+	"colourRed",
+	"colourOlive",
+	"colourGrey",
+] as const;
+
+/** The name key of a line colour, or null for a colour outside `SERIES_COLOURS`. */
+export function colourName(colour: string): (typeof SERIES_COLOUR_NAMES)[number] | null {
+	const at = SERIES_COLOURS.indexOf(colour.toUpperCase() as (typeof SERIES_COLOURS)[number]);
+	return at < 0 ? null : SERIES_COLOUR_NAMES[at]!;
+}
 
 /** The palette colour at a position, wrapping round as kumo's ChartPalette.categorical does. */
 export function chartColour(index: number): string {
@@ -244,16 +299,19 @@ function rgba(hex: string, alpha: number): string {
  * first point to the last and joined them with a straight line. A custom
  * chart's tooltip is ECharts' own: the category label as the header, a
  * row per series and "-" for a missing day. The host strips every
- * `formatter` key and registers no legend, so the options are plain data
- * and series are told apart in the tooltip, as on the timeseries chart.
+ * `formatter` key and registers no legend component, so the options are
+ * plain data, series are told apart in the tooltip, and the caller names
+ * the lines and their colours in text under the chart (`SERIES_COLOUR_NAMES`).
  * Everything else copies kumo's timeseries options (axes, dashed split
  * lines, grid, a gradient under a single line, bars stacked).
  *
  * A series with no value on any day is left out: it would draw nothing,
  * yet take a palette colour and a row of "-" in the tooltip. A series
  * with a `colour` carries it in `itemStyle` (points, bars and the tooltip
- * marker) and `lineStyle`. The host strips only `formatter`, `rich`,
- * `graphic` and `axisPointer` from custom options.
+ * marker) and `lineStyle`, a `line` in `lineStyle.type` and a `marker` in
+ * `symbol`. The host strips only `formatter`, `rich`, `graphic` and
+ * `axisPointer` from custom options (@emdash-cms/blocks 1.1.0
+ * `sanitizeOptions`), so all three reach ECharts.
  */
 export function dailyChart(opts: {
 	labels: string[];
@@ -271,14 +329,18 @@ export function dailyChart(opts: {
 		name: s.name,
 		data: s.data,
 		emphasis: { focus: "series" },
-		...(s.colour !== undefined && { itemStyle: { color: s.colour }, ...(opts.style === "line" && { lineStyle: { color: s.colour } }) }),
+		...(s.colour !== undefined && { itemStyle: { color: s.colour } }),
+		...(opts.style === "line" &&
+			(s.colour !== undefined || s.line !== undefined) && {
+				lineStyle: { ...(s.colour !== undefined && { color: s.colour }), ...(s.line !== undefined && { type: s.line }) },
+			}),
 		...(opts.style === "bar"
 			? { stack: "total" }
 			: {
 					// A day between two missing days is a point of its own, so every point gets its mark.
 					showSymbol: true,
 					showAllSymbol: true,
-					symbolSize: 4,
+					...(s.marker !== undefined && s.marker !== "circle" ? { symbol: s.marker, symbolSize: 7 } : { symbolSize: 4 }),
 					connectNulls: false,
 				}),
 		...(gradient && {

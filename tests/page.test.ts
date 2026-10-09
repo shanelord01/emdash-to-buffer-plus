@@ -72,6 +72,19 @@ describe("the setup section", () => {
 		expect((await host.inspect.scheduledTasks()).map((t) => t.name)).toContain("sync");
 	});
 
+	it("writes its dates the way the rest of the admin does, never as a bare 2026-10-09", async () => {
+		host = await newHost();
+		await postsCollection(host);
+		await seedChannels(host, [channel("c1", "linkedin")], { fetchedAt: "2026-10-08T19:55:00.000Z" });
+		await host.fixtures.plugin.kv("state", { watchSince: "2026-10-01T00:30:00.000Z", syncOffset: 7 });
+		const response = await host.admin.act(PAGE_PATH, SETUP_ACTION);
+		expectValid(response);
+		const body = text(response);
+		expect(body).toContain("Channels as of 9 Oct 2026, 6:55 am AEDT.");
+		expect(body).toContain("Watching for entries published since 1 Oct 2026, 10:30 am AEST.");
+		expect(body).not.toMatch(/\d{4}-\d{2}-\d{2}(?!T)/);
+	});
+
 	it("Discover stores channels, limits and Buffer's configuration hints, and the page shows where each rule came from", async () => {
 		host = await newHost();
 		await respond(

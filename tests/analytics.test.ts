@@ -2,9 +2,9 @@ import type { PluginRuntimeTestHost } from "@emdash-cms/plugin-test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Aggregates, AggregateDay, Origins, ReportState } from "../src/store/report.js";
-import { PAGE_REFRESH_ACTION, RANGE_ACTION, RETRY_ALL_ACTION } from "../src/ui/analytics.js";
-import { CHART_COLOURS, dailyChart } from "../src/ui/blocks.js";
-import { formatShortDay } from "../src/ui/format.js";
+import { distinctLooks, linesKey, PAGE_REFRESH_ACTION, RANGE_ACTION, rangeAction, RETRY_ALL_ACTION, seriesLook } from "../src/ui/analytics.js";
+import { CHART_COLOURS, dailyChart, SERIES_COLOURS } from "../src/ui/blocks.js";
+import { formatRate, formatShortDay } from "../src/ui/format.js";
 import { PAGE_PATH } from "../src/ui/page.js";
 import { SETUP_ACTION } from "../src/ui/analytics.js";
 import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
@@ -105,6 +105,36 @@ describe("the Analytics view", () => {
 		const impressions = stats.items.find((i) => i.label === "Impressions, last 7 days");
 		expect(impressions).toMatchObject({ value: "700", description: "0% on the previous period", trend: "neutral" });
 		expect(text(response)).toContain('"label":"7 days","style":"primary","value":7');
+	});
+
+	it("gives each range button its own action id, reads the range from it, and still takes the id 0.1.5 sent", async () => {
+		host = await newHost();
+		await seedAll(host);
+		const page = await host.admin.loadPage(PAGE_PATH);
+		expectValid(page);
+		const ids = (JSON.stringify(page).match(/"action_id":"buffer:range[^"]*"/g) ?? []).map((m) => m.slice(13, -1));
+		expect(ids).toEqual(["buffer:range:7", "buffer:range:30", "buffer:range:90"]);
+		// Every button in one actions block has its own id: the admin keys them by it.
+		for (const block of JSON.parse(JSON.stringify(page)).blocks as Array<{ type: string; elements?: Array<{ action_id?: string }> }>) {
+			if (block.type !== "actions") continue;
+			const own = (block.elements ?? []).map((e) => e.action_id).filter(Boolean);
+			expect(new Set(own).size, own.join(", ")).toBe(own.length);
+		}
+
+		const week = await host.admin.act(PAGE_PATH, rangeAction(7));
+		expectValid(week);
+		expect(JSON.stringify(week)).toContain("Sent, last 7 days");
+		expect(JSON.stringify(week)).toContain('"action_id":"buffer:range:7","label":"7 days","style":"primary"');
+		// A page drawn by 0.1.5 sends the shared id with the days in the value.
+		const old = await host.admin.act(PAGE_PATH, RANGE_ACTION, { value: 90 });
+		expect(JSON.stringify(old)).toContain("Sent, last 90 days");
+	});
+
+	it("shows engagement rates with one decimal place, so a column lines up", () => {
+		expect(formatRate(3, "en")).toBe("3.0%");
+		expect(formatRate(4.2, "en")).toBe("4.2%");
+		expect(formatRate(4.25, "en")).toBe("4.3%");
+		expect(formatRate(0, "en")).toBe("0.0%");
 	});
 
 	it("shows missing figures as missing, never as zero", async () => {
@@ -281,7 +311,7 @@ describe("Buffer's history limit on the page", () => {
 		expect(stats.items[3]?.value).toBe("3,100");
 		expect(body).toContain("Impressions by day, last 31 days");
 		expect(body).toContain('"label":"Impressions, last 31 days","format":"number"');
-		expect(body).toMatch(/"channel":"Shane on LinkedIn","service":"linkedin","sent":\d+,"failed":\d+,"impressions":3100,"rate":"5%"/);
+		expect(body).toMatch(/"channel":"Shane on LinkedIn","service":"linkedin","sent":\d+,"failed":\d+,"impressions":3100,"rate":"5.0%"/);
 		expect(body).toContain("over the last 31 days, the most your Buffer plan gives");
 		// The 90-day button stays.
 		expect(body).toContain('"label":"90 days","style":"primary"');
@@ -423,7 +453,12 @@ describe("figures by origin", () => {
 describe("charts over the whole range", () => {
 	const chartOf = (response: unknown, blockId: string) => {
 		let found:
-			| { labels: string[]; series: Array<{ name: string; data: Array<number | null>; itemStyle?: { color: string }; lineStyle?: { color: string }; areaStyle?: any }>; tooltip?: unknown; xType?: string }
+			| {
+					labels: string[];
+					series: Array<{ name: string; data: Array<number | null>; itemStyle?: { color: string }; lineStyle?: { color?: string; type?: string }; symbol?: string; areaStyle?: any }>;
+					tooltip?: unknown;
+					xType?: string;
+			  }
 			| undefined;
 		const walk = (node: unknown): void => {
 			if (Array.isArray(node)) return node.forEach(walk);
@@ -609,7 +644,8 @@ describe("charts over the whole range", () => {
 		const colour = (chart: ReturnType<typeof chartOf>, name: string) => {
 			const s = chart.series.find((x) => x.name === name)!;
 			expect(s.lineStyle?.color).toBe(s.itemStyle?.color);
-			return s.itemStyle!.color;
+			// The line and marker travel with the colour.
+			return `${s.itemStyle!.color} ${s.lineStyle?.type} ${s.symbol ?? "circle"}`;
 		};
 		const engagement = chartOf(month, "buffer:chart:engagement");
 		const impressions = chartOf(month, "buffer:chart:impressions");
@@ -617,17 +653,166 @@ describe("charts over the whole range", () => {
 		// Threads reports no impressions: no line there, and Facebook keeps its colour rather than taking the first.
 		expect(impressions.series.map((s) => s.name)).toEqual(["Facebook (Direct)"]);
 		const facebook = colour(engagement, "Facebook (Direct)");
-		expect(CHART_COLOURS).toContain(facebook);
+		expect(facebook).toMatch(/ solid circle$/);
+		expect(CHART_COLOURS).toContain(facebook.split(" ")[0]);
 		expect(colour(impressions, "Facebook (Direct)")).toBe(facebook);
 		expect(colour(engagement, "Threads (Not split)")).not.toBe(facebook);
 		// The gradient under the single line is in that line's colour.
-		const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(facebook.slice(i, i + 2), 16));
+		const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(facebook.split(" ")[0]!.slice(i, i + 2), 16));
 		expect(impressions.series[0]!.areaStyle.color.colorStops[0].color).toBe(`rgba(${r}, ${g}, ${b}, 0.4)`);
 		// Over seven days Threads has no figure and no line; Facebook's colour stays.
 		const weekEngagement = chartOf(week, "buffer:chart:engagement");
 		expect(weekEngagement.series.map((s) => s.name)).toEqual(["Facebook (Direct)"]);
 		expect(colour(weekEngagement, "Facebook (Direct)")).toBe(facebook);
 		expect(colour(chartOf(week, "buffer:chart:impressions"), "Facebook (Direct)")).toBe(facebook);
+	});
+
+	it("names each line and its colour under the chart, since the host registers no legend", async () => {
+		const TH = channel("c5", "threads", { displayName: "FuelOracle Threads" });
+		host = await newHost();
+		await seedSplit(
+			host,
+			{ days: { c2: { [dayAgo(1)]: { direct: { posts: 1, engagement: 3, impressions: 30 } } } }, coveredFrom: { c2: dayAgo(6) } },
+			{ channels: [TH, FBX], methods: { c2: "listed" }, aggregates: { c5: { [dayAgo(3)]: { posts: 1, metrics: { reactions: 1 }, metricsUpdatedAt: NOW.toISOString() } } } },
+		);
+		const response = await host.admin.act(PAGE_PATH, rangeAction(30));
+		expectValid(response);
+		const NAMES = ["blue", "amber", "pink", "purple", "teal", "orange", "green", "red", "olive", "grey"];
+		const contextText = (blockId: string) => {
+			const match = JSON.stringify(response).match(new RegExp(`"type":"context","text":"([^"]*)","block_id":"${blockId}"`));
+			return match?.[1];
+		};
+		for (const id of ["buffer:chart:engagement", "buffer:chart:impressions"]) {
+			const chart = chartOf(response, id);
+			expect(chart.series.length).toBeGreaterThan(0);
+			const expected = `Lines: ${chart.series.map((s) => `${s.name} in ${s.lineStyle!.type} ${NAMES[SERIES_COLOURS.indexOf(s.itemStyle!.color as (typeof SERIES_COLOURS)[number])]}`).join(", ")}.`;
+			expect(contextText(`${id}:lines`), id).toBe(expected);
+		}
+		expect(contextText("buffer:chart:engagement:lines")).toContain("Threads (Not split) in dotted ");
+		// A legend option would draw nothing in EmDash's admin, so none is sent.
+		expect(JSON.stringify(response)).not.toContain('"legend"');
+	});
+
+	/** Each line's look as drawn: colour, line and marker. */
+	const lookOf = (s: ReturnType<typeof chartOf>["series"][number]) => `${s.itemStyle?.color} ${s.lineStyle?.type ?? "solid"} ${s.symbol ?? "circle"}`;
+	const linesText = (response: unknown, blockId: string) =>
+		JSON.stringify(response).match(new RegExp(`"type":"context","text":"([^"]*)","block_id":"${blockId}:lines"`))?.[1];
+	/** "Lines: A in x, B in y." to [["A", "x"], ["B", "y"]]. Channel names here have no comma. */
+	const described = (text: string) =>
+		text
+			.replace(/^Lines: /, "")
+			.replace(/\.$/, "")
+			.split(", ")
+			.map((part) => part.split(" in "));
+	const FOUR = [
+		channel("c1", "facebook", { displayName: "FuelOracle" }),
+		channel("c2", "instagram", { displayName: "fueloracle" }),
+		channel("c3", "threads", { displayName: "fueloracle" }),
+		channel("c4", "linkedin", { displayName: "FuelOracle" }),
+	];
+
+	it("four channels with no split draw four lines that look different and are described differently", async () => {
+		host = await newHost();
+		const figures = (n: number) => ({ posts: 1, metrics: { reactions: n, impressions: 10 * n }, metricsUpdatedAt: NOW.toISOString() });
+		await seedSplit(
+			host,
+			{ days: {}, coveredFrom: {} },
+			{ channels: FOUR, methods: {}, aggregates: Object.fromEntries(FOUR.map((c, i) => [c.id, { [dayAgo(2)]: figures(i + 1), [dayAgo(1)]: figures(i + 2) }])) },
+		);
+
+		const response = await host.admin.act(PAGE_PATH, rangeAction(7));
+
+		expectValid(response);
+		for (const id of ["buffer:chart:engagement", "buffer:chart:impressions"]) {
+			const chart = chartOf(response, id);
+			expect(chart.series.map((s) => s.name)).toEqual(["Facebook (Not split)", "Instagram (Not split)", "Threads (Not split)", "LinkedIn (Not split)"]);
+			// 0.1.6 drew these pink, orange, pink, orange: every Not split took slot 3k + 2.
+			expect(new Set(chart.series.map((s) => s.itemStyle!.color)).size).toBe(4);
+			expect(chart.series.every((s) => s.lineStyle?.type === "dotted")).toBe(true);
+			expect(linesText(response, id)).toBe(
+				"Lines: Facebook (Not split) in dotted blue, Instagram (Not split) in dotted amber, Threads (Not split) in dotted pink, LinkedIn (Not split) in dotted purple.",
+			);
+		}
+	});
+
+	it("four channels split into Direct and Buffer give each channel one colour and each origin its own line", async () => {
+		host = await newHost();
+		const split = (n: number) => ({ direct: { posts: 1, engagement: n, impressions: 10 * n }, buffer: { posts: 1, engagement: n + 1, impressions: 10 * n + 5 } });
+		await seedSplit(
+			host,
+			{ days: Object.fromEntries(FOUR.map((c, i) => [c.id, { [dayAgo(1)]: split(i + 1) }])), coveredFrom: Object.fromEntries(FOUR.map((c) => [c.id, dayAgo(6)])) },
+			{ channels: FOUR, methods: Object.fromEntries(FOUR.map((c) => [c.id, "listed" as const])) },
+		);
+
+		const response = await host.admin.act(PAGE_PATH, rangeAction(7));
+
+		expectValid(response);
+		const chart = chartOf(response, "buffer:chart:engagement");
+		expect(chart.series).toHaveLength(8);
+		expect(new Set(chart.series.map(lookOf)).size).toBe(8);
+		const by = (name: string) => chart.series.find((s) => s.name === name)!;
+		const colours = ["Facebook", "Instagram", "Threads", "LinkedIn"].map((n) => {
+			const direct = by(`${n} (Direct)`);
+			const buffer = by(`${n} (Buffer)`);
+			expect(direct.lineStyle?.type).toBe("solid");
+			expect(buffer.lineStyle?.type).toBe("dashed");
+			expect(buffer.itemStyle!.color).toBe(direct.itemStyle!.color);
+			return direct.itemStyle!.color;
+		});
+		expect(new Set(colours).size).toBe(4);
+		expect(linesText(response, "buffer:chart:engagement")).toBe(
+			"Lines: Facebook (Direct) in solid blue, Facebook (Buffer) in dashed blue, Instagram (Direct) in solid amber, Instagram (Buffer) in dashed amber, Threads (Direct) in solid pink, Threads (Buffer) in dashed pink, LinkedIn (Direct) in solid purple, LinkedIn (Buffer) in dashed purple.",
+		);
+	});
+
+	it("a channel's look depends only on its place among the shared channels and its origin", () => {
+		const ids = ["a", "b", "c", "d"];
+		for (const origin of ["direct", "buffer", "unsplit"] as const) {
+			// Which other channels or origins have lines does not enter into it.
+			expect(seriesLook(ids, "c", origin).colour).toBe(SERIES_COLOURS[2]);
+			expect(distinctLooks([{ name: "C", ...seriesLook(ids, "c", origin) }])[0]).toEqual({ name: "C", ...seriesLook(ids, "c", origin) });
+		}
+		expect(seriesLook(ids, "c", "direct").line).toBe("solid");
+		expect(seriesLook(ids, "c", "buffer").line).toBe("dashed");
+		expect(seriesLook(ids, "c", "unsplit").line).toBe("dotted");
+	});
+
+	it("past the six host colours, lines take four more colours and then markers, and never repeat a look or a description", () => {
+		const ids = Array.from({ length: 25 }, (_, i) => `ch${i}`);
+		const lines = distinctLooks(ids.flatMap((id, i) => (["direct", "buffer", "unsplit"] as const).map((origin) => ({ name: `Page ${i} (${origin})`, ...seriesLook(ids, id, origin) }))));
+		expect(new Set(lines.map((l) => `${l.colour} ${l.line} ${l.marker}`)).size).toBe(75);
+		// Channels 7 to 10 take the added colours, still with dots.
+		expect(lines.filter((l) => l.line === "solid").slice(6, 10).map((l) => [l.colour, l.marker])).toEqual([
+			["#3A9C3E", "circle"],
+			["#C8323C", "circle"],
+			["#8A9A1B", "circle"],
+			["#7D8590", "circle"],
+		]);
+		expect(seriesLook(ids, "ch10", "direct")).toEqual({ colour: SERIES_COLOURS[0], line: "solid", marker: "rect" });
+		const text = linesKey(lines, "en");
+		expect(text).toContain("Page 6 (direct) in solid green, ");
+		expect(text).toContain("Page 10 (direct) in solid blue with squares, ");
+		expect(text).toContain("Page 24 (unsplit) in dotted teal with triangles.");
+		const looks = described(text).map(([, look]) => look);
+		expect(looks).toHaveLength(75);
+		expect(new Set(looks).size).toBe(75);
+	});
+
+	it("settles a repeated look on one chart: channels missing from the shared list, and more than sixty channels", () => {
+		const ids = ["a", "b"];
+		const orphans = distinctLooks([
+			{ name: "X", ...seriesLook(ids, "x", "direct") },
+			{ name: "Y", ...seriesLook(ids, "y", "direct") },
+		]);
+		expect(orphans[0]!.colour).not.toBe(orphans[1]!.colour);
+		expect(orphans.map((l) => l.line)).toEqual(["solid", "solid"]);
+
+		const many = Array.from({ length: 70 }, (_, i) => `p${i}`);
+		const lines = distinctLooks(many.map((id, i) => ({ name: `Page ${i}`, ...seriesLook(many, id, "unsplit") })));
+		expect(new Set(lines.map((l) => `${l.colour} ${l.line} ${l.marker}`)).size).toBe(70);
+		// Sixty dotted looks first; the last ten take another line rather than repeat one.
+		expect(lines.filter((l) => l.line === "dotted")).toHaveLength(60);
+		expect(new Set(described(linesKey(lines, "en")).map(([, look]) => look)).size).toBe(70);
 	});
 
 	it("ten channels split two ways over 90 days stay inside Block Kit's node limit, keeping each chart's busiest lines", async () => {
@@ -655,6 +840,10 @@ describe("charts over the whole range", () => {
 		// The busiest lines are kept, in their usual order.
 		expect(engagement.series.map((s) => s.name)).toEqual(["LinkedIn Page 6 (Direct)", "LinkedIn Page 7 (Direct)", "LinkedIn Page 8 (Direct)", "LinkedIn Page 9 (Direct)"]);
 		expect(JSON.stringify(response)).toMatch(/Each chart shows its \d+ busiest lines of 20\./);
+		// Ten channels take ten different colours, and no two lines share a description.
+		expect(new Set(engagement.series.map(lookOf)).size).toBe(engagement.series.length);
+		const looks = described(linesText(response, "buffer:chart:engagement")!).map(([, look]) => look);
+		expect(new Set(looks).size).toBe(engagement.series.length);
 	});
 });
 

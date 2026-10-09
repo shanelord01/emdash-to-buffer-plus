@@ -22,7 +22,14 @@
  * - after: each channel's latest delivery (waiting, queued with its time,
  *   posted with a link to the live post, failed with Buffer's reason and a
  *   Retry, skipped with its reason), and "Send again" behind a
- *   confirmation step.
+ *   confirmation step. Send again is offered for a sent record and for an
+ *   Instagram record skipped for its image's shape (`imageAspect`), and for
+ *   Instagram it works the image out again from the entry and checks its
+ *   shape before anything is sent.
+ *
+ * Before the first send, an Instagram channel that will be skipped because
+ * the entry's image is outside 4:5 to 1.91:1 gets a warning line, worked
+ * out from the entry the panel reads anyway (no extra bridge call).
  *
  * Confirmation is a step of the panel, not the host's dialog. The first
  * press of Share now or Send again re-renders the panel as a question with
@@ -55,17 +62,20 @@
  * - Send again, first press: those three (3);
  * - Send again, confirmed: those three, the claim, the post, the result,
  *   and a continuation or the rate-limit reading when Buffer answers so (7),
- *   and one more to read the entry when the record carries an image
- *   address from 0.1.3 or earlier, which needs signing in (8).
+ *   and one more to read the entry when the record is for Instagram (its
+ *   image's shape is checked again) or carries an image address from 0.1.3
+ *   or earlier, which needs signing in (8).
  */
 
 import type { PluginContext, SandboxedRouteContext } from "emdash/plugin";
 
-import { channelBlocker, textLimit } from "../buffer/services.js";
+import { channelBlocker, ruleFor, textLimit } from "../buffer/services.js";
 import { langOf, reasonText, t, type Lang } from "../i18n.js";
+import { ASPECT_SERVICE, formatRatio, shapeProblem } from "../publish/aspect.js";
 import { metered } from "../publish/budget.js";
+import { resolveImage } from "../publish/image.js";
 import { againRecord, needsImageRepair, repairImage, retryOne, sendPrepared, shareNow } from "../publish/pipeline.js";
-import type { EntryRef } from "../publish/prepare.js";
+import { imageSourceOf, type EntryRef } from "../publish/prepare.js";
 import { readSettings, type PluginSettings } from "../settings.js";
 import { DELIVERIES, POST_NOT_FOUND, type Delivery } from "../store/deliveries.js";
 import { channelConfig, hintsFor, readStored, type Stored } from "../store/kv.js";
@@ -187,10 +197,10 @@ export async function handlePanel(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 		blocks = renderDeliveries({ lang, records, canManage, zone: settings.timeZone });
 	} else if (publishedBeforeWatch(await loadItem(), stored.state.watchSince)) {
 		blocks = canManage
-			? renderBeforeWatch({ lang, settings, stored, override: await loadOverride() })
+			? renderBeforeWatch({ lang, settings, stored, override: await loadOverride(), warnings: shapeWarnings(lang, stored, await loadOverride(), ctx.site.url, entry.collection, await loadItem()) })
 			: [context(t(lang, "panelBeforeWatch")), pageLink(lang)];
 	} else {
-		blocks = renderBeforeSend({ lang, settings, stored, override: await loadOverride() });
+		blocks = renderBeforeSend({ lang, settings, stored, override: await loadOverride(), warnings: shapeWarnings(lang, stored, await loadOverride(), ctx.site.url, entry.collection, await loadItem()) });
 	}
 	return toast ? { blocks, toast } : { blocks };
 }
@@ -276,20 +286,21 @@ async function sendAgain(
 	const refusal = againRefusal(records, target, lang);
 	if (refusal || !target) return { message: refusal ?? t(lang, "panelAgainNothing"), type: "error" };
 	const row = againRecord(target, now);
-	// An image address from 0.1.3 or earlier needs signing in: worked out again from the entry first.
-	if (needsImageRepair(row.data)) row.data = await repairImage(ctx, stored, row.data, new Map());
+	// Worked out again from the entry first: an image address from 0.1.3 or
+	// earlier needs signing in, and Instagram's image may have changed shape.
+	if (needsImageRepair(row.data) || row.data.service === ASPECT_SERVICE) row.data = await repairImage(ctx, stored, row.data, new Map());
 	records.push(row);
 	await sendPrepared(ctx, meter, settings, stored, [row], now);
 	const result = row.data;
 	if (result.status === "sent") return { message: t(lang, "panelAgainSent"), type: "success" };
 	if (result.status === "failed") return { message: t(lang, "panelAgainFailed", { message: result.error ?? "" }), type: "error" };
-	if (result.status === "skipped") return { message: reasonText(lang, result.reason ?? "needsImage"), type: "error" };
+	if (result.status === "skipped") return { message: skipText(result, lang), type: "error" };
 	return { message: t(lang, "panelAgainQueued"), type: "success" };
 }
 
 /** Why Send again cannot go ahead, or null. Checked on the first press and again on the confirm press. */
 function againRefusal(records: Row[], target: Row | undefined, lang: Lang): string | null {
-	if (!target || target.data.status !== "sent") return t(lang, "panelAgainNothing");
+	if (!target || !canSendAgain(target.data)) return t(lang, "panelAgainNothing");
 	// A double press, or a second editor at the same moment, must not post twice.
 	const latest = latestByChannel(records).get(target.data.channelId);
 	if (latest && ["pending", "sending", "unknown"].includes(latest.row.data.status)) return t(lang, "panelAgainBusy");
@@ -374,7 +385,7 @@ function choiceFields(lang: Lang, settings: PluginSettings, stored: Stored, over
 	return { fields, blocked };
 }
 
-export function renderBeforeSend(input: { lang: Lang; settings: PluginSettings; stored: Stored; override: EntryOverride | null }): PageBlock[] {
+export function renderBeforeSend(input: { lang: Lang; settings: PluginSettings; stored: Stored; override: EntryOverride | null; warnings?: string[] }): PageBlock[] {
 	const { lang, settings, stored, override } = input;
 	if (!settings.accessToken) return [context(t(lang, "panelNoKey")), pageLink(lang)];
 	if (panelChannels(stored).length === 0) return [context(t(lang, "panelNoChannels")), pageLink(lang)];
@@ -386,6 +397,7 @@ export function renderBeforeSend(input: { lang: Lang; settings: PluginSettings; 
 		out.push(form(fields, { label: t(lang, "save"), actionId: PANEL_SAVE_ACTION }, { blockId: "buffer:panel:choices" }));
 		out.push(context(t(lang, "panelBeforeHelp")));
 	}
+	for (const line of input.warnings ?? []) out.push(banner({ title: line, variant: "alert" }));
 	for (const line of blocked) out.push(context(line));
 	if (stored.state.watchSince) out.push(context(t(lang, "panelWatchNote", { date: formatTime(stored.state.watchSince, lang, settings.timeZone) })));
 	out.push(pageLink(lang));
@@ -398,7 +410,7 @@ export function renderBeforeSend(input: { lang: Lang; settings: PluginSettings; 
  * (`renderShareQuestion`). A Block Kit form's submit takes no confirm, so
  * the choices are saved first and the button shares with what was saved.
  */
-export function renderBeforeWatch(input: { lang: Lang; settings: PluginSettings; stored: Stored; override: EntryOverride | null }): PageBlock[] {
+export function renderBeforeWatch(input: { lang: Lang; settings: PluginSettings; stored: Stored; override: EntryOverride | null; warnings?: string[] }): PageBlock[] {
 	const { lang, settings, stored, override } = input;
 	const out: PageBlock[] = [context(t(lang, "panelBeforeWatch"))];
 	if (!settings.accessToken) return [...out, context(t(lang, "panelNoKey")), pageLink(lang)];
@@ -410,6 +422,7 @@ export function renderBeforeWatch(input: { lang: Lang; settings: PluginSettings;
 		out.push(form(fields, { label: t(lang, "save"), actionId: PANEL_SAVE_ACTION }, { blockId: "buffer:panel:choices" }));
 		out.push(context(t(lang, "panelShareHelp")));
 	}
+	for (const line of input.warnings ?? []) out.push(banner({ title: line, variant: "alert" }));
 	for (const line of blocked) out.push(context(line));
 	const count = shareableChannels(stored, override).length;
 	if (count === 0) out.push(context(t(lang, "panelShareNoChannel")));
@@ -449,7 +462,7 @@ export function renderDeliveries(input: { lang: Lang; records: Row[]; canManage:
 		const elements: ActionElement[] = [];
 		if (d.externalLink) elements.push(link(t(lang, "viewPost"), { kind: "external", url: d.externalLink }, { appearance: "secondary" }));
 		if (canManage && d.status === "failed") elements.push(button(PANEL_RETRY_ACTION, t(lang, "panelRetry"), { style: "primary", value: row.id }));
-		if (canManage && d.status === "sent") {
+		if (canManage && canSendAgain(d)) {
 			elements.push(
 				// No host `confirm`: its dialog has no padding (emdash-cms/emdash#3644). The first press asks in the panel.
 				button(PANEL_AGAIN_ACTION, t(lang, "panelAgain"), { style: "secondary", value: row.id }),
@@ -495,9 +508,52 @@ export function stateText(d: Delivery, lang: Lang, zone: string): string {
 	}
 }
 
+/**
+ * A record Send again may copy: a post Buffer took and is done with (posted,
+ * could not publish, or no longer in Buffer), or one skipped only for its
+ * image's shape. Never while the post is still queued, sending, a draft or
+ * waiting for approval at Buffer, or before its status has been read: a
+ * second post then would sit beside the first. A failed delivery has Retry.
+ */
+export function canSendAgain(d: Delivery): boolean {
+	if (d.status === "skipped") return d.reason === "imageAspect";
+	return d.status === "sent" && (d.postStatus === "sent" || d.postStatus === "error" || d.postStatus === POST_NOT_FOUND);
+}
+
+/** A skip reason in words; the image's shape is named when the record carries its size. */
+export function skipText(d: Delivery, lang: Lang): string {
+	if (d.reason === "imageAspect" && d.imageWidth && d.imageHeight) return t(lang, "imageAspectRatio", { ratio: formatRatio(d.imageWidth, d.imageHeight) });
+	return reasonText(lang, d.reason ?? "needsImage");
+}
+
+/**
+ * A warning for each Instagram channel the entry would go to whose image is
+ * known to be outside 4:5 to 1.91:1, as `prepareDeliveries` would find it:
+ * the collection's image source, read from the entry the panel holds.
+ */
+export function shapeWarnings(
+	lang: Lang,
+	stored: Stored,
+	override: EntryOverride | null,
+	site: string,
+	collection: string,
+	item: Pick<ContentItem, "data" | "seo"> | null,
+): string[] {
+	if (!item) return [];
+	const channels = shareableChannels(stored, override).filter((c) => c.service === ASPECT_SERVICE);
+	if (channels.length === 0) return [];
+	const image = resolveImage(imageSourceOf(stored.config.collections[collection]), { data: item.data, seo: item.seo }, site);
+	return channels.flatMap((channel) => {
+		const rule = ruleFor(channel.service, hintsFor(stored.channels, channel.id));
+		if (rule.image === "never") return [];
+		const shape = image.ok ? shapeProblem(channel.service, image) : null;
+		return shape ? [t(lang, "panelInstagramSkip", { name: channel.displayName || channel.name, ratio: formatRatio(shape.width, shape.height) })] : [];
+	});
+}
+
 /** Buffer's reason or the skip reason, when there is one to show. */
 function detailText(d: Delivery, lang: Lang): string | null {
-	if (d.status === "skipped" && d.reason) return reasonText(lang, d.reason);
+	if (d.status === "skipped" && d.reason) return skipText(d, lang);
 	if (d.status === "failed" && d.error) return t(lang, "panelBufferSaid", { message: d.error });
 	if (d.status === "sent" && d.postStatus === "error" && d.postError) return t(lang, "panelBufferSaid", { message: d.postError });
 	return null;

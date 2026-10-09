@@ -65,6 +65,13 @@ export interface Delivery {
 	 * the entry could not be read.
 	 */
 	imageIssue?: "noPublicAddress" | "entryUnreadable";
+	/**
+	 * The image's size in pixels when the entry carried it. Kept on an
+	 * Instagram record skipped as `imageAspect`, so the panel can say what
+	 * shape the image was.
+	 */
+	imageWidth?: number;
+	imageHeight?: number;
 	/** The link card's description: the entry's excerpt. */
 	linkDescription?: string;
 	/** Pinterest: the board chosen for the channel when the record was prepared. */

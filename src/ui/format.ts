@@ -16,12 +16,15 @@ export function formatCount(value: number, lang: Lang): string {
 	}
 }
 
-/** Buffer's engagementRate is 0 to 100 (PostMetricUnit `percentage`). */
+/**
+ * Buffer's engagementRate is 0 to 100 (PostMetricUnit `percentage`). Always
+ * one decimal place, so rates in one column line up ("3.0%" beside "4.2%").
+ */
 export function formatRate(percent: number, lang: Lang): string {
 	try {
-		return new Intl.NumberFormat(lang, { style: "percent", maximumFractionDigits: 1 }).format(percent / 100);
+		return new Intl.NumberFormat(lang, { style: "percent", minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(percent / 100);
 	} catch {
-		return `${Math.round(percent * 10) / 10}%`;
+		return `${(Math.round(percent * 10) / 10).toFixed(1)}%`;
 	}
 }
 

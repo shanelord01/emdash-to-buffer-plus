@@ -19,7 +19,16 @@
 	"release": {
 		"requires": { "env:emdash": ">=1.1.0" },
 		"artifacts": {
-			"banner": { "file": "./images/banner.webp" }
+			"icon": { "file": "./images/icon.webp" },
+			"banner": { "file": "./images/banner.webp" },
+			// Taken on a filler-data site ("Coastline Notes"), never a real one.
+			"screenshots": [
+				{ "file": "./images/screenshot-1-overview.webp" },
+				{ "file": "./images/screenshot-2-engagement.webp" },
+				{ "file": "./images/screenshot-3-channels.webp" },
+				{ "file": "./images/screenshot-4-editor-panel.webp" },
+				{ "file": "./images/screenshot-5-dashboard-card.webp" }
+			]
 		}
 	},
 
