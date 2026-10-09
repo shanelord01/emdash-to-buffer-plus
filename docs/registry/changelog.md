@@ -3,7 +3,8 @@
 - Instagram takes 4:5 (tall) to 1.91:1 (wide) only, and Buffer cannot crop. An image known to be outside that range now skips Instagram up front with the reason, instead of failing at Buffer. Other networks are not affected, and an image of unknown size is sent as before.
 - The editor panel warns before the first share. After a differently shaped image is published, Send again checks it again and sends.
 - Send again is offered only once Buffer is done with a post, never while it is queued.
-- The charts name each line and its colour, engagement rates show one decimal place, and the Setup view's dates match the rest of the admin.
+- The charts name each line and its colour, and every line looks different: a colour per channel, with Direct solid, Buffer dashed and Not split dotted. Before, four unsplit channels drew pink and orange twice.
+- Engagement rates show one decimal place, and the Setup view's dates match the rest of the admin.
 - No new permissions, settings or MCP tool changes.
 
 ## 0.1.5, 9 October 2026

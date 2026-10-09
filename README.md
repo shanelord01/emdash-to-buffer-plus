@@ -35,6 +35,12 @@ report what you find in the repository's issues.
   post beside one still waiting.
 - The engagement and impressions charts name each line and its colour
   underneath, since EmDash's charts draw no legend.
+- Every line on a chart now looks different. Each channel has its own
+  colour, and its Direct, Buffer and Not split lines are solid, dashed
+  and dotted. Before, channels with only Not split lines took pink and
+  orange in turn, so four channels drew two colours twice. Past six
+  channels four more colours follow, and past ten the colours repeat
+  with square, triangle and other point markers.
 - Engagement rates show one decimal place ("3.0%" beside "4.2%"), the
   Setup view writes its dates like the rest of the admin, the range
   buttons no longer share one id (which logged a React warning), and a
@@ -420,7 +426,9 @@ gives. A day the post list covers with no posts of that origin is 0. A
 day without figures yet, and a figure the network does not report, is a
 gap, never a 0. Hovering shows the day and each line's figure, with "-"
 for a gap. EmDash's charts have no legend, so a line under each chart
-names its lines and their colours. With many channels over a long range, each chart keeps its
+names its lines, their colours and their style: each channel has a
+colour, and its Direct, Buffer and Not split lines are solid, dashed and
+dotted. With many channels over a long range, each chart keeps its
 busiest lines and says so.
 
 Every day is a day in the "Time zone" setting: a post published at

@@ -38,7 +38,7 @@ import {
 import type { PluginSettings } from "../settings.js";
 import { channelConfig, hintsFor, limitFor, storedReadings, type Stored } from "../store/kv.js";
 import { daysBetween, RANGES, type Aggregates, type Day, type Ledger, type Origins, type RangeDays } from "../store/report.js";
-import { actions, banner, button, chartColour, colourName, columns, context, dailyChart, empty, header, link, stats, table, type PageBlock, type StatItem } from "./blocks.js";
+import { actions, banner, button, colourName, columns, context, dailyChart, empty, header, LINE_TYPES, link, MARKERS, SERIES_COLOURS, stats, table, type LineType, type Marker, type PageBlock, type StatItem } from "./blocks.js";
 import { dayOf } from "../time/zone.js";
 import { comparisonText, formatAge, formatCount, formatDay, formatRate, formatShortDay, formatTime, trendOf } from "./format.js";
 
@@ -299,37 +299,93 @@ function splitText(series: OriginSeries[], key: "engagement" | "impressions", la
 	return totals ? t(lang, "originSplit", { direct: formatCount(totals.direct, lang), buffer: formatCount(totals.buffer, lang) }) : null;
 }
 
-/** "Lines: Facebook (Direct) in blue, Facebook (Buffer) in yellow." The host's charts have no legend. */
-export function linesKey(lines: Array<{ name: string; colour: string }>, lang: Lang): string {
+/** "Lines: Facebook (Direct) in solid blue, Facebook (Buffer) in dashed blue." The host's charts have no legend. */
+export function linesKey(lines: Array<{ name: string } & SeriesLook>, lang: Lang): string {
 	const named = lines.map((line) => {
 		const key = colourName(line.colour);
-		return key ? t(lang, "chartLine", { name: line.name, colour: t(lang, key) }) : line.name;
+		if (!key) return line.name;
+		const look =
+			line.marker === "circle"
+				? t(lang, "chartLook", { line: t(lang, LINE_KEY[line.line]), colour: t(lang, key) })
+				: t(lang, "chartLookMarked", { line: t(lang, LINE_KEY[line.line]), colour: t(lang, key), marker: t(lang, MARKER_KEY[line.marker]) });
+		return t(lang, "chartLine", { name: line.name, look });
 	});
 	return t(lang, "chartLines", { list: named.join(", ") });
 }
 
 const SERIES_KEY = { direct: "seriesDirect", buffer: "seriesBuffer", unsplit: "seriesUnsplit" } as const;
-const ORIGIN_ORDER = ["direct", "buffer", "unsplit"] as const;
+const LINE_KEY = { solid: "lineSolid", dashed: "lineDashed", dotted: "lineDotted" } as const;
+const MARKER_KEY = { circle: "markerCircle", rect: "markerRect", triangle: "markerTriangle", diamond: "markerDiamond", pin: "markerPin", arrow: "markerArrow" } as const;
+
+/** How a line is drawn: its colour, its line and its point marker. */
+export interface SeriesLook {
+	colour: string;
+	line: LineType;
+	marker: Marker;
+}
+
+/** Each origin's line: Direct solid, Buffer dashed, Not split dotted. */
+const ORIGIN_LINE: Record<OriginSeries["origin"], LineType> = { direct: "solid", buffer: "dashed", unsplit: "dotted" };
+
+/** Every look in order: colours fastest, then markers, then lines. */
+const LOOK_COUNT = SERIES_COLOURS.length * MARKERS.length * LINE_TYPES.length;
+
+function lookAt(place: number, line: LineType): SeriesLook {
+	const n = SERIES_COLOURS.length;
+	return { colour: SERIES_COLOURS[place % n]!, line, marker: MARKERS[Math.floor(place / n) % MARKERS.length]! };
+}
+
+const lookKey = (look: SeriesLook) => `${look.colour} ${look.line} ${look.marker}`;
 
 /**
- * A series' colour, fixed by its channel and origin: the shared channels in
- * Buffer's order, each with Direct, Buffer and Not split, take the host
- * palette in turn. The place counts every channel and origin whether or
- * not it has a line, so a line keeps its colour on both charts and on
- * every range when another line is left out.
+ * A line's look, fixed by its channel and origin. The colour is the
+ * channel's: its place among the shared channels in Buffer's order picks
+ * from `SERIES_COLOURS` (the host's six, then four more), so every line of
+ * one channel has one colour and a channel keeps it on both charts and
+ * every range whatever other lines are left out. The origin picks the line
+ * (`ORIGIN_LINE`), so a channel's Direct, Buffer and Not split lines are
+ * told apart on one chart. Past ten channels the colours come round again
+ * with another marker (squares, then triangles, diamonds, pins, arrows),
+ * which covers sixty channels before a look repeats; `distinctLooks`
+ * settles any repeat on a chart.
  */
-export function seriesColour(channelIds: string[], channelId: string, origin: OriginSeries["origin"]): string {
+export function seriesLook(channelIds: string[], channelId: string, origin: OriginSeries["origin"]): SeriesLook {
 	const at = channelIds.indexOf(channelId);
-	return chartColour((at < 0 ? channelIds.length : at) * ORIGIN_ORDER.length + ORIGIN_ORDER.indexOf(origin));
+	return lookAt(at < 0 ? channelIds.length : at, ORIGIN_LINE[origin]);
 }
 
 /**
- * One line per channel and origin, "Facebook (Direct)", in the host's own
- * palette, over every day Buffer's figures can cover. A day with no value
+ * The looks of one chart's lines, made distinct. A line whose look an
+ * earlier line already has moves to the next free one: first the next
+ * place with the same line, so the origin still shows, then any free look.
+ * Only a channel missing from the shared list or more than sixty channels
+ * can repeat a look, so the usual lines keep `seriesLook`'s.
+ */
+export function distinctLooks<T extends SeriesLook>(lines: T[]): T[] {
+	const taken = new Set<string>();
+	return lines.map((line) => {
+		let look: SeriesLook = line;
+		if (taken.has(lookKey(look))) {
+			const place = SERIES_COLOURS.indexOf(line.colour as (typeof SERIES_COLOURS)[number]) + SERIES_COLOURS.length * MARKERS.indexOf(line.marker);
+			const perLine = SERIES_COLOURS.length * MARKERS.length;
+			const candidates = [
+				...Array.from({ length: perLine }, (_, i) => lookAt(place + 1 + i, line.line)),
+				...Array.from({ length: LOOK_COUNT }, (_, i) => lookAt(i % perLine, LINE_TYPES[Math.floor(i / perLine)]!)),
+			];
+			look = candidates.find((c) => !taken.has(lookKey(c))) ?? look;
+		}
+		taken.add(lookKey(look));
+		return { ...line, colour: look.colour, line: look.line, marker: look.marker };
+	});
+}
+
+/**
+ * One line per channel and origin, "Facebook (Direct)", in its channel's
+ * colour and its origin's line, over every day Buffer's figures can cover. A day with no value
  * is a gap, not a zero. A line with no figure Buffer reported for the
  * chart's metric is left out, so a network that does not report
  * impressions draws no line of zeros, and so is a line with no value on
- * the days drawn. Each line's colour comes from `seriesColour`, so a
+ * the days drawn. Each line's look comes from `seriesLook`, so a
  * channel and origin look the same on both charts. Past `CHART_VALUES`,
  * each chart keeps its busiest lines and the page says so.
  */
@@ -345,7 +401,7 @@ function figureCharts(series: OriginSeries[], channelIds: string[], days: Day[],
 				return {
 					name: t(lang, SERIES_KEY[s.origin], { network: s.name }),
 					data: days.map((d) => byDay.get(d) ?? null),
-					colour: seriesColour(channelIds, s.channelId, s.origin),
+					...seriesLook(channelIds, s.channelId, s.origin),
 					size: reportedTotal(s.days, key) ?? 0,
 				};
 			})
@@ -356,8 +412,9 @@ function figureCharts(series: OriginSeries[], channelIds: string[], days: Day[],
 			lines = lines.filter((line) => keep.has(line));
 		}
 		if (lines.length === 0) return [context(t(lang, "noFigures"))];
+		lines = distinctLooks(lines);
 		return [
-			dailyChart({ labels, series: lines.map(({ name, data, colour }) => ({ name, data, colour })), style: "line", height: 220, gradient: true, yAxisName, blockId }),
+			dailyChart({ labels, series: lines.map(({ name, data, colour, line, marker }) => ({ name, data, colour, line, marker })), style: "line", height: 220, gradient: true, yAxisName, blockId }),
 			// The host draws no legend: name each line and its colour.
 			context(linesKey(lines, lang), { blockId: `${blockId}:lines` }),
 		];
