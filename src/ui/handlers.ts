@@ -97,7 +97,7 @@ export async function handleAdmin(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 		let toast: Toast | undefined;
 		if (isAction && actionId === WIDGET_REFRESH_ACTION) toast = await refresh(ctx, lang, now);
 		else await ensureScheduled(ctx, settings.syncInterval, offset);
-		const { ledger, aggregates } = await loadSnapshots(ctx);
+		const { ledger, aggregates } = await loadSnapshots(ctx, settings.timeZone);
 		const blocks = renderWidget({ lang, settings, stored, ledger, aggregates, now });
 		return toast ? { blocks, toast } : { blocks };
 	}
@@ -117,7 +117,7 @@ export async function handleAdmin(routeCtx: SandboxedRouteContext, rawCtx: Plugi
 		await ensureScheduled(ctx, settings.syncInterval, offset);
 	}
 
-	const { ledger, aggregates, origins } = await loadSnapshots(ctx);
+	const { ledger, aggregates, origins } = await loadSnapshots(ctx, settings.timeZone);
 	const failed = await ctx.storage.deliveries!.count({ status: "failed" });
 	const blocks = renderAnalytics({ lang, settings, stored, ledger, aggregates, origins, failed, range: isAction ? range : DEFAULT_RANGE, canManage, now });
 	return toast ? { blocks, toast } : { blocks };

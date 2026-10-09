@@ -1,15 +1,14 @@
+## 0.1.5, 9 October 2026
+
+- Days are now your local days. 0.1.4 counted each post on its UTC day, so in Sydney a post before about 10 or 11 am showed a day early, and ranges turned over at UTC midnight. A new setting, Time zone (default Australia/Sydney), sets the zone for charts, ranges and times.
+- After the update the first sync drops the daily figures stored by UTC day and reads them again from Buffer, as far back as your plan allows (31 days on the Free plan). Until then the figure charts are empty.
+- A banner on the registry listing.
+- No new permissions. The MCP tools now describe their days in your time zone, so EmDash turns Agent access off after the update. Turn it on again under Plugins.
+
 ## 0.1.4, 3 October 2026
 
 - Images now use the site's public media address. 0.1.3 and earlier sent an address that needs signing in, so Buffer could not read the image. Retry on a delivery that failed this way sends the image from the public address.
 - Each channel keeps the same colour on the engagement and impressions charts, and a line with nothing to draw no longer takes a colour.
-- No new permissions and no MCP tool output changes.
-
-## 0.1.3, 3 October 2026
-
-- The engagement and impressions charts cover every day of the range. A day with no posts counts as 0. Days without figures, and figures a network does not report, stay as gaps.
-- The sent and failed chart covers the whole range too, and chart tooltips show the day without a time.
-- Share now and Send again ask for confirmation inside the editor panel, naming the channels.
-- The Setup view says older entries can be shared with Share now.
 - No new permissions and no MCP tool output changes.
 
 Full history: [CHANGELOG.md](https://github.com/shanelord01/emdash-to-buffer-plus/blob/main/CHANGELOG.md).

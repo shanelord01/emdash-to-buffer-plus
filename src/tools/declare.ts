@@ -22,8 +22,10 @@ import { SKIP_REASONS } from "../buffer/services.js";
 import { DEFAULT_LIMIT, DEFAULT_SUMMARY_DAYS, DELIVERY_STATUSES, MAX_COLLECTION, MAX_ENTRY_ID, MAX_LIMIT, TOOL_ROUTES } from "./load.js";
 
 export function mcpTools(): Record<string, SandboxedMcpTool> {
+	// Days follow the "Time zone" setting (src/time/zone.ts). Moments are
+	// still UTC instants.
 	const iso = z.string().describe("ISO 8601, UTC.");
-	const day = z.string().describe("A UTC day, YYYY-MM-DD.");
+	const day = z.string().describe("A day in the plugin's Time zone setting, YYYY-MM-DD.");
 	const lastSync = iso.nullable().describe("When the plugin last synced with Buffer, or null before the first sync.");
 	const status = z
 		.enum(DELIVERY_STATUSES as [string, ...string[]])
@@ -169,10 +171,10 @@ export function mcpTools(): Record<string, SandboxedMcpTool> {
 				days: z
 					.union([z.literal(7), z.literal(30), z.literal(90)])
 					.optional()
-					.describe(`Window in days, ending today (UTC). Default ${DEFAULT_SUMMARY_DAYS}.`),
+					.describe(`Window in days, ending today in the Time zone setting. Default ${DEFAULT_SUMMARY_DAYS}.`),
 			}),
 			output: z.object({
-				window: z.object({ days: z.number().int(), since: day, until: day.describe("Today in UTC. Its figures still move.") }),
+				window: z.object({ days: z.number().int(), since: day, until: day.describe("Today in the Time zone setting. Its figures still move.") }),
 				sent: z.number().int(),
 				failed: z.number().int(),
 				queued: z.number().int().describe("Waiting to be sent or queued in Buffer now."),

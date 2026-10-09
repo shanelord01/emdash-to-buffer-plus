@@ -17,6 +17,21 @@ report what you find in the repository's issues.
 
 ## What's new
 
+**0.1.5, 9 October 2026**
+- Days are now your local days. 0.1.4 and earlier counted every post on
+  its UTC day, so in Sydney anything posted before about 10 or 11 am
+  showed a day early, and "today" and every range turned over at UTC
+  midnight. A new setting, "Time zone" (default `Australia/Sydney`),
+  sets the zone for the charts, the ranges and the times the admin
+  shows.
+- After the update the first sync drops the daily figures stored by UTC
+  day and reads them again from Buffer, as far back as your plan allows
+  (31 days on the Free plan). Until then the figure charts are empty.
+- A banner on the registry listing.
+- No new permissions. The MCP tools now describe their days in your
+  time zone, so EmDash turns Agent access off after the update. Turn it
+  on again under Plugins.
+
 **0.1.4, 3 October 2026**
 - Images now use the site's public media address. 0.1.3 and earlier sent
   an address that needs signing in, so Buffer could not read the image.
@@ -142,6 +157,7 @@ Open Plugins in the admin, then the plugin's settings.
 | Keep delivery history for | 180 days by default, 30 to 730. Older records are deleted a hundred at a time |
 | Sync every | 30 minutes by default. How often the plugin checks Buffer for post status and figures and retries anything waiting. Each site runs it at a minute of its own, never on the hour or half hour |
 | Leave for other tools | 25% by default, 10 to 75. The share of Buffer's daily and 30-day limits the background reports leave for your other API keys and connected assistants. See "What the plugin requests" |
+| Time zone | `Australia/Sydney` by default. An IANA time zone name, such as `Australia/Perth` or `Europe/London`. The reports count each post on its day in this zone, "today" and every range end at its midnight, and the admin shows times in it. A name the server does not recognise falls back to `Australia/Sydney`. Changing it rebuilds the daily figures from Buffer, as far back as your plan allows. EmDash does not give plugins the site's own time zone, so it is set here |
 
 ## Setup page
 
@@ -369,6 +385,11 @@ gap, never a 0. Hovering shows the day and each line's figure, with "-"
 for a gap. With many channels over a long range, each chart keeps its
 busiest lines and says so.
 
+Every day is a day in the "Time zone" setting: a post published at
+8:15 am in Sydney counts on that Sydney day, and the plugin asks Buffer
+for each day from that zone's midnight to the next. A day on which the
+clocks change is 23 or 25 hours long, and so is its window.
+
 They cover up to ten shared channels. Buffer refreshes figures about once
 a day, so a new post shows figures a day or so after it goes out. The
 comparison with the previous period appears once the stored history
@@ -432,7 +453,8 @@ an entry is being created.
   this entry, and only this one, as if it had just been published. Its
   posts show "Shared by hand". Editors see the line and a link to the
   Buffer Plus page.
-- After: each channel's state, the time a queued post is due (in UTC), a
+- After: each channel's state, the time a queued post is due (in the
+  "Time zone" setting), a
   link to the live post, Buffer's reason when it failed, and the skip
   reason when it was skipped. Administrators also see Retry for a failed
   post and Send again for a post Buffer took, which asks in the panel

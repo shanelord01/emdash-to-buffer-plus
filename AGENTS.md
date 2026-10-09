@@ -160,6 +160,14 @@ never in the runtime bundle). A plain `pnpm install` is enough.
   the `origins` row through the origins phase, so splitting Direct from
   Buffer costs no Buffer request. Buffer does not document whether
   `network` posts are listed: a channel with none listed is `derived`.
+- **Days are local, never UTC.** Every day key is a calendar day in the
+  "Time zone" setting (EmDash gives a sandboxed plugin no site time zone).
+  Make days with `src/time/zone.ts`: `dayOf` for a moment's day,
+  `dayStart` and `dayEnd` for the UTC instants Buffer is asked for, and
+  `addDays`/`daysBetween` for calendar steps. Never `toISOString().slice(0, 10)`
+  or a hand-written offset. The `aggregates` and `origins` rows carry
+  `zone` and the report state `dayZone`: a row in another zone reads as
+  empty and the sync rebuilds it.
 - **Every settingsSchema key is in the manifest.** A setting that exists
   only in code is unusable on a registry install. The generated form
   takes only text, number, on/off, fixed select, secret, URL and email;

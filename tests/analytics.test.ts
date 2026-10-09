@@ -9,7 +9,7 @@ import { PAGE_PATH } from "../src/ui/page.js";
 import { SETUP_ACTION } from "../src/ui/analytics.js";
 import { WIDGET_ID, WIDGET_REFRESH_ACTION } from "../src/ui/widget.js";
 import { allOn, channel, deliveries, expectValid, HOUR, newHost, NOW, reading, seedChannels, seedConfig, seedDelivery, seedState } from "./host.js";
-import { DAY, dayAgo, entry, nothingDue, seedAggregates, seedLedger, seedReport, today } from "./report-fixtures.js";
+import { DAY, dayAgo, entry, nothingDue, seedAggregates, seedLedger, seedReport, today, ZONE } from "./report-fixtures.js";
 
 let host: PluginRuntimeTestHost | undefined;
 
@@ -207,7 +207,7 @@ describe("reports paused for the account's other tools", () => {
 		expectValid(analytics);
 		const banner = blocksOf(analytics).find((b) => b.block_id === "buffer:headroom");
 		expect(banner).toMatchObject({ type: "banner", variant: "alert" });
-		expect(String(banner?.description)).toMatch(/^Reports paused to leave Buffer requests for your other tools until .+ UTC\. Posts still go out\.$/);
+		expect(String(banner?.description)).toMatch(/^Reports paused to leave Buffer requests for your other tools until .+ AE[DS]T\. Posts still go out\.$/);
 
 		const setup = await host.admin.act(PAGE_PATH, SETUP_ACTION);
 		expectValid(setup);
@@ -339,7 +339,7 @@ describe("figures by origin", () => {
 			ranges: {},
 			progress: {},
 		});
-		await host!.fixtures.plugin.storage("reports", "origins", origins);
+		await host!.fixtures.plugin.storage("reports", "origins", { zone: ZONE, ...origins });
 		await seedReport(runtime, {
 			...nothingDue(),
 			origins: { at: NOW.toISOString(), since: dayAgo(0), channels: Object.fromEntries(Object.entries(methods).map(([id, method]) => [id, { method, counts: { network: method === "listed" ? 2 : 0, buffer: 1, api: 1 } }])) },
@@ -450,7 +450,7 @@ describe("charts over the whole range", () => {
 		await seedState(runtime, { watchSince: ago(3) });
 		await seedLedger(runtime, { e1: entry({ sentAt: ago(1), createdAt: ago(1) }) });
 		await seedAggregates(runtime, { days: opts.aggregates ?? {}, ranges: {}, progress: {} });
-		await runtime.fixtures.plugin.storage("reports", "origins", origins);
+		await runtime.fixtures.plugin.storage("reports", "origins", { zone: ZONE, ...origins });
 		const methods = opts.methods ?? { c1: "listed" };
 		await seedReport(runtime, {
 			...nothingDue(),
@@ -641,7 +641,7 @@ describe("charts over the whole range", () => {
 		await seedState(host, { watchSince: ago(100) });
 		await seedLedger(host, Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`e${i}`, entry({ channelId: `m${i % 10}`, sentAt: ago(i), createdAt: ago(i), engagement: i })])));
 		await seedAggregates(host, { days: {}, ranges: {}, progress: {} });
-		await host.fixtures.plugin.storage("reports", "origins", { days: originDays, coveredFrom: Object.fromEntries(many.map((c) => [c.id, dayAgo(89)])) });
+		await host.fixtures.plugin.storage("reports", "origins", { zone: ZONE, days: originDays, coveredFrom: Object.fromEntries(many.map((c) => [c.id, dayAgo(89)])) });
 		await seedReport(host, {
 			...nothingDue(),
 			origins: { at: NOW.toISOString(), since: dayAgo(89), channels: Object.fromEntries(many.map((c) => [c.id, { method: "listed" as const, counts: { network: 90, buffer: 90, api: 0 } }])) },

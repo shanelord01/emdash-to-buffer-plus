@@ -25,8 +25,11 @@
 import type { MetricMap } from "../buffer/metrics.js";
 import type { RateLimitSnapshot } from "../buffer/ratelimit.js";
 import { engagementOf, engagementRateOf, impressionsOf } from "../buffer/metrics.js";
+import { addDays, daysBetween, type Day } from "../time/zone.js";
 import { capText, isRecord } from "../values.js";
 import type { Delivery } from "./deliveries.js";
+
+export { addDays, daysBetween, type Day };
 
 export const REPORTS = "reports";
 export const LEDGER_ID = "ledger";
@@ -43,9 +46,6 @@ export type RangeDays = (typeof RANGES)[number];
 
 /** A ledger keeps at most this many lines, oldest dropped first, so its row stays small. */
 export const LEDGER_MAX = 3000;
-
-/** A UTC calendar day, `YYYY-MM-DD`. */
-export type Day = string;
 
 export interface LedgerEntry {
 	title: string;
@@ -82,7 +82,7 @@ export interface AggregateDay {
 export interface ChannelProgress {
 	/** The oldest day fetched; every day from it to `recentOn` has been read once. */
 	backTo?: Day;
-	/** The UTC day on which the last 30 days were last read in full. */
+	/** The day on which the last 30 days were last read in full. */
 	recentOn?: Day;
 	/** Where today's pass over the last 30 days continues, going back. */
 	recentNext?: Day;
@@ -96,17 +96,29 @@ export interface RangeFigures {
 }
 
 export interface Aggregates {
+	/**
+	 * The IANA time zone the days are keyed in. Rows written before 0.1.5
+	 * have none: they were keyed by UTC day, and are read as empty.
+	 */
+	zone?: string;
 	days: Record<string, Record<Day, AggregateDay>>;
 	/** Per channel, keyed by the range the page offers ("7", "30", "90"). */
 	ranges: Record<string, Partial<Record<string, RangeFigures>>>;
 	progress: Record<string, ChannelProgress>;
-	/** The UTC day the range figures were last read. */
+	/** The day the range figures were last read. */
 	rangesOn?: Day;
-	/** The UTC day a request failed, so the phase rests until tomorrow. */
+	/** The day a request failed, so the phase rests until tomorrow. */
 	failedOn?: Day;
 }
 
 export interface ReportState {
+	/**
+	 * The IANA time zone the state's days (`metrics.day`, `aggregates.done`,
+	 * the origins pass) are in. Absent before 0.1.5, when they were UTC
+	 * days. When it differs from the setting, those days are dropped and
+	 * read again (`settleDayZone`).
+	 */
+	dayZone?: string;
 	scan?: { after?: string; seen?: string[]; cursor?: string; at?: string; pending?: boolean };
 	status?: { at?: string; after?: string; seen?: string[]; pending?: boolean };
 	metrics?: { day?: Day; org?: number; cursor?: string; at?: string; from?: Day; since?: Day };
@@ -191,18 +203,22 @@ export interface OriginWork {
 }
 
 export interface Origins {
+	/** The IANA time zone the days are keyed in, as for `Aggregates.zone`. */
+	zone?: string;
 	days: Record<string, Record<Day, OriginDay>>;
 	/** Per channel, the oldest day a pass covered: inside it, a day with no entry had no posts listed. */
 	coveredFrom: Record<string, Day>;
 }
 
-export function emptyOrigins(): Origins {
-	return { days: {}, coveredFrom: {} };
+export function emptyOrigins(zone: string): Origins {
+	return { zone, days: {}, coveredFrom: {} };
 }
 
-export function parseOrigins(raw: unknown): Origins {
-	if (!isRecord(raw)) return emptyOrigins();
+/** The `origins` row, or an empty one when it is missing or keyed in another zone (a row from before 0.1.5 is keyed by UTC day). */
+export function parseOrigins(raw: unknown, zone: string): Origins {
+	if (!isRecord(raw) || raw.zone !== zone) return emptyOrigins(zone);
 	return {
+		zone,
 		days: isRecord(raw.days) ? (raw.days as Origins["days"]) : {},
 		coveredFrom: isRecord(raw.coveredFrom) ? (raw.coveredFrom as Origins["coveredFrom"]) : {},
 	};
@@ -216,17 +232,19 @@ export function emptyLedger(): Ledger {
 	return { entries: {} };
 }
 
-export function emptyAggregates(): Aggregates {
-	return { days: {}, ranges: {}, progress: {} };
+export function emptyAggregates(zone: string): Aggregates {
+	return { zone, days: {}, ranges: {}, progress: {} };
 }
 
 export function parseLedger(raw: unknown): Ledger {
 	return isRecord(raw) && isRecord(raw.entries) ? (raw as unknown as Ledger) : emptyLedger();
 }
 
-export function parseAggregates(raw: unknown): Aggregates {
-	if (!isRecord(raw)) return emptyAggregates();
+/** The `aggregates` row, or an empty one when it is missing or keyed in another zone (a row from before 0.1.5 is keyed by UTC day). */
+export function parseAggregates(raw: unknown, zone: string): Aggregates {
+	if (!isRecord(raw) || raw.zone !== zone) return emptyAggregates(zone);
 	return {
+		zone,
 		days: isRecord(raw.days) ? (raw.days as Aggregates["days"]) : {},
 		ranges: isRecord(raw.ranges) ? (raw.ranges as Aggregates["ranges"]) : {},
 		progress: isRecord(raw.progress) ? (raw.progress as Aggregates["progress"]) : {},
@@ -269,15 +287,22 @@ export function trimLedger(ledger: Ledger, now: Date): Ledger {
 	return { entries: Object.fromEntries(kept.slice(0, LEDGER_MAX)) };
 }
 
-export function utcDay(date: Date): Day {
-	return date.toISOString().slice(0, 10);
-}
-
-export function addDays(day: Day, n: number): Day {
-	return utcDay(new Date(Date.parse(`${day}T00:00:00.000Z`) + n * 86_400_000));
-}
-
-/** Whole days from `a` to `b` (positive when `b` is later). */
-export function daysBetween(a: Day, b: Day): number {
-	return Math.round((Date.parse(`${b}T00:00:00.000Z`) - Date.parse(`${a}T00:00:00.000Z`)) / 86_400_000);
+/**
+ * Bring the report state's days into `zone`. When they were worked out in
+ * another zone (or in UTC, before 0.1.5, which kept no zone), every day
+ * the state holds is dropped: the metrics pass and the aggregates phase
+ * are due at once and start again, the origins pass in progress and its
+ * summary go, and the history limit Buffer named is kept. The `aggregates`
+ * and `origins` rows carry their own zone and read as empty until those
+ * phases write them again, so the rebuild costs no extra bridge call.
+ * Returns true when anything was dropped.
+ */
+export function settleDayZone(report: ReportState, zone: string): boolean {
+	if (report.dayZone === zone) return false;
+	report.dayZone = zone;
+	delete report.metrics;
+	delete report.aggregates;
+	delete report.origins;
+	delete report.originsWork;
+	return true;
 }

@@ -37,6 +37,7 @@ import {
 	total,
 } from "../report/figures.js";
 import { DELIVERIES, type Delivery, type DeliveryStatus } from "../store/deliveries.js";
+import { readSettings } from "../settings.js";
 import { channelConfig, hintsFor, latestRateLimit, limitFor, readStored, type Stored } from "../store/kv.js";
 import { AGGREGATES_ID, LEDGER_ID, parseAggregates, parseLedger, REPORTS, type Day } from "../store/report.js";
 import { isRecord } from "../values.js";
@@ -267,15 +268,17 @@ export async function channelHealth(ctx: PluginContext): Promise<ChannelHealthRe
  */
 export async function engagementSummary(ctx: PluginContext, input: unknown, now: Date): Promise<EngagementSummaryResult> {
 	const days = pickDays(asRecord(input).days);
+	// The "Time zone" setting: which day is today and which day each post counts on.
+	const zone = (await readSettings(ctx)).timeZone;
 	const stored = await readStored(ctx);
 	const rows = await ctx.storage[REPORTS]!.getMany([LEDGER_ID, AGGREGATES_ID]);
 	const ledger = parseLedger(rows.get(LEDGER_ID));
-	const aggregates = parseAggregates(rows.get(AGGREGATES_ID));
+	const aggregates = parseAggregates(rows.get(AGGREGATES_ID), zone);
 
 	const shared = (stored.channels?.channels ?? []).filter((c) => stored.config.channels[c.id]?.enabled);
 	const ids = shared.map((c) => c.id);
-	const { current, previous } = periodOf(days, now);
-	const reaches = ledgerReaches(stored.state.watchSince, previous);
+	const { current, previous } = periodOf(days, now, zone);
+	const reaches = ledgerReaches(stored.state.watchSince, previous, zone);
 	const figures = figuresByDay(aggregates, ids, current);
 	const before = aggregatesReach(aggregates, ids, previous) ? figuresByDay(aggregates, ids, previous) : null;
 	const nameOf = (id: string) => {
@@ -285,19 +288,19 @@ export async function engagementSummary(ctx: PluginContext, input: unknown, now:
 
 	return {
 		window: { days, since: current.start, until: current.end },
-		sent: sentIn(ledger, current),
-		failed: failedIn(ledger, current),
+		sent: sentIn(ledger, current, zone),
+		failed: failedIn(ledger, current, zone),
 		queued: queued(ledger).length,
 		impressions: total(figures, "impressions") ?? null,
 		engagement: total(figures, "engagement") ?? null,
 		previous: {
-			sent: reaches ? sentIn(ledger, previous) : null,
-			failed: reaches ? failedIn(ledger, previous) : null,
+			sent: reaches ? sentIn(ledger, previous, zone) : null,
+			failed: reaches ? failedIn(ledger, previous, zone) : null,
 			impressions: before ? (total(before, "impressions") ?? null) : null,
 			engagement: before ? (total(before, "engagement") ?? null) : null,
 		},
 		figuresSince: aggregatesSince(aggregates, ids) ?? null,
-		channels: channelTotals(ledger, aggregates, ids, current, days).map((row) => ({
+		channels: channelTotals(ledger, aggregates, ids, current, days, zone).map((row) => ({
 			channelId: row.channelId,
 			name: nameOf(row.channelId)?.name ?? row.channelName ?? row.channelId,
 			service: nameOf(row.channelId)?.service ?? row.service ?? "",
@@ -306,7 +309,7 @@ export async function engagementSummary(ctx: PluginContext, input: unknown, now:
 			impressions: row.impressions ?? null,
 			engagementRate: row.engagementRate ?? null,
 		})),
-		topEntries: topEntries(ledger, current, TOP_ENTRIES).map((e) => ({
+		topEntries: topEntries(ledger, current, TOP_ENTRIES, zone).map((e) => ({
 			title: e.title,
 			collection: e.collection,
 			channelName: nameOf(e.channelId)?.name ?? e.channelName,

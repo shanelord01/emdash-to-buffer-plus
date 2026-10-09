@@ -46,15 +46,16 @@ export function renderWidget(input: WidgetInput): PageBlock[] {
 		];
 	}
 
-	const { current, previous } = periodOf(WIDGET_DAYS, now);
-	const reaches = ledgerReaches(stored.state.watchSince, previous);
-	const sent = sentIn(ledger, current);
-	const sentPrev = reaches ? sentIn(ledger, previous) : null;
-	const failed = failedIn(ledger, current);
-	const failedPrev = reaches ? failedIn(ledger, previous) : null;
+	const zone = settings.timeZone;
+	const { current, previous } = periodOf(WIDGET_DAYS, now, zone);
+	const reaches = ledgerReaches(stored.state.watchSince, previous, zone);
+	const sent = sentIn(ledger, current, zone);
+	const sentPrev = reaches ? sentIn(ledger, previous, zone) : null;
+	const failed = failedIn(ledger, current, zone);
+	const failedPrev = reaches ? failedIn(ledger, previous, zone) : null;
 	// Buffer's figures cover only what the plan allows, should that be under a week.
 	const figureDays = effectiveDays(WIDGET_DAYS, stored.report.insightsHistory?.days);
-	const engagement = total(figuresByDay(aggregates, shared.map((c) => c.id), periodOf(figureDays, now).current), "engagement");
+	const engagement = total(figuresByDay(aggregates, shared.map((c) => c.id), periodOf(figureDays, now, zone).current), "engagement");
 	const waiting = queued(ledger);
 	const next = nextQueued(ledger, now);
 	const sentTrend = trendOf(sent, sentPrev);
@@ -69,7 +70,7 @@ export function renderWidget(input: WidgetInput): PageBlock[] {
 			{
 				label: t(lang, "widgetQueued"),
 				value: formatCount(waiting.length, lang),
-				description: waiting.length === 0 ? t(lang, "queuedNone") : next?.dueAt ? t(lang, "queuedNext", { date: formatDay(next.dueAt, lang) }) : t(lang, "queuedWaiting"),
+				description: waiting.length === 0 ? t(lang, "queuedNone") : next?.dueAt ? t(lang, "queuedNext", { date: formatDay(next.dueAt, lang, zone) }) : t(lang, "queuedWaiting"),
 			},
 		]),
 		context(
@@ -78,7 +79,7 @@ export function renderWidget(input: WidgetInput): PageBlock[] {
 				: t(lang, "widgetEngagement", { days: figureDays, count: formatCount(engagement, lang) }),
 		),
 	];
-	if (next?.dueAt) out.push(context(t(lang, "nextQueued", { title: next.title || t(lang, "untitled"), date: formatDay(next.dueAt, lang) })));
+	if (next?.dueAt) out.push(context(t(lang, "nextQueued", { title: next.title || t(lang, "untitled"), date: formatDay(next.dueAt, lang, zone) })));
 	out.push(context(t(lang, "thisWeekNote")));
 	out.push(actions([button(WIDGET_REFRESH_ACTION, t(lang, "refresh"), { style: "secondary" }), pageLink]));
 	return out;

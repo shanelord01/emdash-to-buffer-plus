@@ -19,8 +19,13 @@
  *   keeps only the metric types all of them report (post-metrics.md,
  *   "Cross-channel intersection"), which would drop impressions and
  *   Buffer's own engagement rate.
- * - The window is UTC midnight to 23:59:59 of the day, the form the guide's
- *   example uses; the reference describes the end as inclusive of its day.
+ * - A day is a calendar day in the "Time zone" setting (src/time/zone.ts),
+ *   so a post at 8:15 am in Sydney counts on that Sydney day. Its window
+ *   runs from the zone's midnight to the last second before the next one,
+ *   both sent as UTC instants (`2026-09-26T14:00:00Z` to
+ *   `2026-09-27T13:59:59Z` for 27 September in Sydney), the form of the
+ *   guide's example, and the reference describes the end as inclusive. A day
+ *   on which the clocks change is 23 or 25 hours long, and the window is too.
  * - Figures are refreshed about daily (AggregatedPostMetrics
  *   .metricsUpdatedAt), so the last 30 days are read again once a day and
  *   older days keep what was read last.
@@ -53,10 +58,10 @@ import {
 	RANGES,
 	REPORT_DAYS,
 	REPORTS,
-	utcDay,
 	type Aggregates,
 	type Day,
 } from "../store/report.js";
+import { dayEnd, dayOf, dayStart } from "../time/zone.js";
 import {
 	backfillHeadroom,
 	headroom,
@@ -121,11 +126,12 @@ export function aggregatesDue(p: PhaseContext): boolean {
 	const state = p.report.aggregates;
 	if (state?.failedAt && p.now.getTime() - Date.parse(state.failedAt) < RETRY_AFTER_FAILURE_MS) return false;
 	if (p.report.forcedAt && (!state?.at || state.at < p.report.forcedAt)) return true;
-	return state?.done !== utcDay(p.now);
+	return state?.done !== dayOf(p.now, p.settings.timeZone);
 }
 
-function dayWindow(organizationId: string, channelId: string, day: Day): AggregateWindow {
-	return { organizationId, channelId, start: `${day}T00:00:00Z`, end: `${day}T23:59:59Z`, key: day };
+/** One channel's day in the zone, from its first second to its last, as UTC instants. */
+export function dayWindow(organizationId: string, channelId: string, day: Day, zone: string): AggregateWindow {
+	return { organizationId, channelId, start: dayStart(day, zone), end: dayEnd(day, zone), key: day };
 }
 
 /**
@@ -133,7 +139,7 @@ function dayWindow(organizationId: string, channelId: string, day: Day): Aggrega
  * `withBackfill`, days older than the last 30 are left for a later run: the
  * backfill runs only while Buffer's 24-hour window is at least half full.
  */
-export function plan(agg: Aggregates, targets: Array<{ id: string; organizationId: string }>, today: Day, withBackfill = true, limit?: number): Planned[] {
+export function plan(agg: Aggregates, targets: Array<{ id: string; organizationId: string }>, today: Day, zone: string, withBackfill = true, limit?: number): Planned[] {
 	const floor = later(addDays(today, -(REPORT_DAYS - 1)), historyFloor(today, limit));
 	const recentFloor = recentFloorOf(today, limit);
 	settleRecent(agg, today, recentFloor);
@@ -144,12 +150,12 @@ export function plan(agg: Aggregates, targets: Array<{ id: string; organizationI
 		const prog = agg.progress[t.id] ?? {};
 		if (prog.recentOn !== today) {
 			for (let day = prog.recentNext ?? today; daysBetween(recentFloor, day) >= 0; day = addDays(day, -1)) {
-				recent.push({ kind: "recent", window: dayWindow(t.organizationId, t.id, day) });
+				recent.push({ kind: "recent", window: dayWindow(t.organizationId, t.id, day, zone) });
 			}
 		}
 		if (withBackfill && prog.backTo) {
 			for (let day = addDays(prog.backTo, -1); daysBetween(floor, day) >= 0; day = addDays(day, -1)) {
-				backfill.push({ kind: "backfill", window: dayWindow(t.organizationId, t.id, day) });
+				backfill.push({ kind: "backfill", window: dayWindow(t.organizationId, t.id, day, zone) });
 			}
 		}
 		if (agg.rangesOn !== today) {
@@ -158,7 +164,7 @@ export function plan(agg: Aggregates, targets: Array<{ id: string; organizationI
 				ranges.push({
 					kind: "range",
 					days,
-					window: { organizationId: t.organizationId, channelId: t.id, start: `${addDays(today, -(days - 1))}T00:00:00Z`, end: `${today}T23:59:59Z`, key: String(range) },
+					window: { organizationId: t.organizationId, channelId: t.id, start: dayStart(addDays(today, -(days - 1)), zone), end: dayEnd(today, zone), key: String(range) },
 				});
 			}
 		}
@@ -190,7 +196,8 @@ export function historyCheckDue(p: PhaseContext): boolean {
 export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promise<void> {
 	const client = p.client;
 	if (!client) return;
-	const today = utcDay(p.now);
+	const zone = p.settings.timeZone;
+	const today = dayOf(p.now, zone);
 	const stamp = p.now.toISOString();
 	const targets = aggregateTargets(p);
 	if (targets.length === 0) {
@@ -200,7 +207,8 @@ export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promi
 
 	const row = await p.ctx.storage[REPORTS]!.get(AGGREGATES_ID);
 	const before = JSON.stringify(row ?? null);
-	const agg = parseAggregates(row);
+	// A row keyed in another zone (UTC, before 0.1.5) reads as empty and is rebuilt.
+	const agg = parseAggregates(row, zone);
 	if (p.report.forcedAt && (!p.report.aggregates?.at || p.report.aggregates.at < p.report.forcedAt)) {
 		// A Refresh reads the recent days and the ranges again.
 		for (const prog of Object.values(agg.progress)) {
@@ -218,7 +226,7 @@ export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promi
 	for (let round = 0; round < limitRounds; round++) {
 		const limit = historyDays(p);
 		const check = round === 0 && historyCheckDue(p) && backfillHeadroom(p);
-		const batch = check ? [checkItem(targets[0]!, today, limit!)] : plan(agg, targets, today, backfillHeadroom(p), limit).slice(0, ALIASES_PER_REQUEST);
+		const batch = check ? [checkItem(targets[0]!, today, limit!, zone)] : plan(agg, targets, today, zone, backfillHeadroom(p), limit).slice(0, ALIASES_PER_REQUEST);
 		if (batch.length === 0) break;
 		// Shared bucket: checked before every request, with the reading the last one brought back.
 		if (!headroom(p)) break;
@@ -275,15 +283,15 @@ export async function runAggregatesPhase(p: PhaseContext, rounds: number): Promi
 	prune(agg, new Set((p.stored.channels?.channels ?? []).map((c) => c.id)), today);
 	if (JSON.stringify(agg) !== before) await p.ctx.storage[REPORTS]!.put(AGGREGATES_ID, agg);
 
-	const remaining = plan(agg, targets, today, backfillHeadroom(p), historyDays(p)).length;
+	const remaining = plan(agg, targets, today, zone, backfillHeadroom(p), historyDays(p)).length;
 	p.report.aggregates = failed
 		? { ...p.report.aggregates, failedAt: stamp }
 		: { at: stamp, ...(remaining === 0 ? { done: today } : { pending: true }) };
 }
 
 /** The weekly check: one channel's day just beyond the history limit, asked for alone. */
-function checkItem(target: { id: string; organizationId: string }, today: Day, limit: number): Planned {
-	return { kind: "check", window: dayWindow(target.organizationId, target.id, addDays(today, -limit)) };
+function checkItem(target: { id: string; organizationId: string }, today: Day, limit: number, zone: string): Planned {
+	return { kind: "check", window: dayWindow(target.organizationId, target.id, addDays(today, -limit), zone) };
 }
 
 /**

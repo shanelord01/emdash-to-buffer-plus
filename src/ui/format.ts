@@ -5,6 +5,7 @@
  */
 
 import { t, type Lang } from "../i18n.js";
+import { dayOf, isDay } from "../time/zone.js";
 
 export function formatCount(value: number, lang: Lang): string {
 	if (!Number.isFinite(value)) return "0";
@@ -40,23 +41,36 @@ export function formatAge(iso: string | undefined, now: Date, lang: Lang): strin
 	}
 }
 
-/** A UTC day the reader's way: "18 Sept 2026". */
-export function formatDay(day: string, lang: Lang): string {
-	const ms = Date.parse(`${day.slice(0, 10)}T00:00:00.000Z`);
+function localeOf(lang: Lang): string {
+	return lang === "en" ? "en-AU" : lang;
+}
+
+/**
+ * A day the reader's way: "18 Sept 2026". A calendar day (`YYYY-MM-DD`,
+ * already worked out in the "Time zone" setting) is shown as that date.
+ * A moment (`Post.dueAt` and the like) is shown as the day it falls on in
+ * `zone`.
+ */
+export function formatDay(day: string, lang: Lang, zone: string): string {
+	const calendar = isDay(day);
+	const ms = calendar ? Date.parse(`${day}T00:00:00.000Z`) : Date.parse(day);
 	if (Number.isNaN(ms)) return day;
 	try {
-		return new Intl.DateTimeFormat(lang === "en" ? "en-AU" : lang, { dateStyle: "medium", timeZone: "UTC" }).format(ms);
+		return new Intl.DateTimeFormat(localeOf(lang), { dateStyle: "medium", timeZone: calendar ? "UTC" : zone }).format(ms);
 	} catch {
-		return day.slice(0, 10);
+		return calendar ? day : dayOf(ms, zone);
 	}
 }
 
-/** A UTC day as a chart label: "23 Sept". */
+/**
+ * A calendar day as a chart label: "23 Sept". The day is already in the
+ * "Time zone" setting, so it is shown as the date it names, never moved.
+ */
 export function formatShortDay(day: string, lang: Lang): string {
 	const ms = Date.parse(`${day.slice(0, 10)}T00:00:00.000Z`);
 	if (Number.isNaN(ms)) return day;
 	try {
-		return new Intl.DateTimeFormat(lang === "en" ? "en-AU" : lang, { day: "numeric", month: "short", timeZone: "UTC" }).format(ms);
+		return new Intl.DateTimeFormat(localeOf(lang), { day: "numeric", month: "short", timeZone: "UTC" }).format(ms);
 	} catch {
 		return day.slice(5, 10);
 	}
@@ -87,16 +101,23 @@ export function comparisonText(current: number, previous: number | null, lang: L
 }
 
 /**
- * A moment with its time, in UTC and labelled so: "4 Oct 2026, 9:30 am UTC".
- * The plugin does not know the reader's time zone, and Buffer's own times
- * (Post.dueAt, Post.sentAt) are UTC.
+ * A moment with its time in the "Time zone" setting, labelled with the
+ * zone's short name: "4 Oct 2026, 9:30 am AEST". Buffer's own times
+ * (Post.dueAt, Post.sentAt) are UTC instants.
  */
-export function formatTime(iso: string, lang: Lang): string {
+export function formatTime(iso: string, lang: Lang, zone: string): string {
 	const ms = Date.parse(iso);
 	if (Number.isNaN(ms)) return iso;
 	try {
-		const text = new Intl.DateTimeFormat(lang === "en" ? "en-AU" : lang, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(ms);
-		return `${text} UTC`;
+		return new Intl.DateTimeFormat(localeOf(lang), {
+			day: "numeric",
+			month: "short",
+			year: "numeric",
+			hour: "numeric",
+			minute: "2-digit",
+			timeZone: zone,
+			timeZoneName: "short",
+		}).format(ms);
 	} catch {
 		return `${iso.slice(0, 16).replace("T", " ")} UTC`;
 	}

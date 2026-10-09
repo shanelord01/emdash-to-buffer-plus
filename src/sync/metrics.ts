@@ -12,7 +12,7 @@
  *
  * - This plugin's deliveries get their post's status and figures.
  * - Every post Buffer lists, whoever made it, is summed per channel, per
- *   UTC day it went out and per origin (PostVia: `network` is made on the
+ *   day it went out in the "Time zone" setting and per origin (PostVia: `network` is made on the
  *   network itself, `buffer` and `api` through Buffer). The sums ride in
  *   the report state while a pass spans several pages, and the origins
  *   phase files them in the `origins` row once the pass is done
@@ -21,7 +21,9 @@
  * `posts` filters on `createdAt` and `dueAt` but not on the time a post
  * went out (reference.md: PostsFiltersInput), so the window asks from a
  * few days before the first day counted and each post is placed by its
- * `sentAt` here. The window keeps inside Buffer's history limit when one
+ * `sentAt` here. The window's first creation day starts at that day's
+ * midnight in the zone, sent to Buffer as a UTC instant
+ * (`2026-09-02T14:00:00Z` for 3 September in Sydney). The window keeps inside Buffer's history limit when one
  * is known (src/buffer/history.ts): a page refused for it is asked again
  * at once, cut to the limit, while the invocation has the calls.
  *
@@ -42,12 +44,12 @@ import {
 	parseOrigins,
 	REPORT_DAYS,
 	REPORTS,
-	utcDay,
 	type Day,
 	type OriginDay,
 	type OriginSum,
 	type OriginWork,
 } from "../store/report.js";
+import { dayOf, dayStart } from "../time/zone.js";
 import { headroom, historyDays, learnHistory, noteOtherFailure, observe, refusalOf, RUN_RESERVE, type PhaseContext } from "./common.js";
 
 export const METRICS_DAYS = 30;
@@ -85,14 +87,15 @@ export function metricsDue(p: PhaseContext): boolean {
 	if (!state?.day) return true;
 	if (state.cursor || state.org) return true;
 	if (p.report.forcedAt && (!state.at || state.at < p.report.forcedAt)) return true;
-	return state.day !== utcDay(p.now);
+	return state.day !== dayOf(p.now, p.settings.timeZone);
 }
 
 export async function runMetricsPhase(p: PhaseContext): Promise<void> {
 	const client = p.client;
 	if (!client) return;
 	const stamp = p.now.toISOString();
-	const today = utcDay(p.now);
+	const zone = p.settings.timeZone;
+	const today = dayOf(p.now, zone);
 	const targets = metricsTargets(p);
 	const state = p.report.metrics ?? {};
 	const index = state.day === today || state.cursor ? (state.org ?? 0) : 0;
@@ -106,7 +109,7 @@ export async function runMetricsPhase(p: PhaseContext): Promise<void> {
 	const midPass = Boolean(state.cursor) || (state.day === today && index > 0);
 	let window = midPass && state.from && state.since ? { from: state.from, since: state.since } : metricsWindow(today, historyDays(p));
 	if (!headroom(p)) return;
-	let result = await client.sentPostMetrics(target.organizationId, target.channelIds, `${window.since}T00:00:00Z`, state.cursor);
+	let result = await client.sentPostMetrics(target.organizationId, target.channelIds, dayStart(window.since, zone), state.cursor);
 	observe(p, result.rateLimit);
 	if (!result.ok) {
 		const refusal = refusalOf(result);
@@ -121,7 +124,7 @@ export async function runMetricsPhase(p: PhaseContext): Promise<void> {
 		p.report.metrics = { day: "", ...(state.at && { at: state.at }) };
 		if (midPass || p.meter.left() < RUN_RESERVE + 3 || !headroom(p)) return;
 		window = metricsWindow(today, historyDays(p));
-		result = await client.sentPostMetrics(target.organizationId, target.channelIds, `${window.since}T00:00:00Z`);
+		result = await client.sentPostMetrics(target.organizationId, target.channelIds, dayStart(window.since, zone));
 		observe(p, result.rateLimit);
 		if (!result.ok) {
 			const again = refusalOf(result);
@@ -157,7 +160,7 @@ export async function runMetricsPhase(p: PhaseContext): Promise<void> {
 	const previous = p.report.originsWork;
 	const work: OriginWork =
 		midPass && previous && !previous.ready && previous.since === window.from ? previous : { day: today, since: window.from, days: {}, counts: {} };
-	addOrigins(work, result.data.posts, new Set(target.channelIds), window.from, today);
+	addOrigins(work, result.data.posts, new Set(target.channelIds), window.from, today, zone);
 
 	if (result.data.hasNextPage && result.data.endCursor) {
 		p.report.metrics = { ...state, day: state.day || today, org: index, cursor: result.data.endCursor, from: window.from, since: window.since };
@@ -178,10 +181,10 @@ export function originOf(via: string | null): "direct" | "buffer" | null {
 	return null;
 }
 
-/** The UTC day a post went out: `sentAt`, else when it was due, else when it was made. */
-function sentDayOf(post: MetricsPost): Day | null {
+/** The day a post went out in the zone: `sentAt`, else when it was due, else when it was made. */
+function sentDayOf(post: MetricsPost, zone: string): Day | null {
 	const at = post.sentAt ?? post.dueAt ?? post.createdAt;
-	return at ? at.slice(0, 10) : null;
+	return at && !Number.isNaN(Date.parse(at)) ? dayOf(at, zone) : null;
 }
 
 function addTo(sum: OriginSum | undefined, post: MetricsPost): OriginSum {
@@ -200,10 +203,10 @@ function addTo(sum: OriginSum | undefined, post: MetricsPost): OriginSum {
  * counted as unread and adds no figure. Posts on other channels, outside
  * the days or with an unknown PostVia add nothing to the sums.
  */
-export function addOrigins(work: OriginWork, posts: MetricsPost[], channels: Set<string>, from: Day, today: Day): void {
+export function addOrigins(work: OriginWork, posts: MetricsPost[], channels: Set<string>, from: Day, today: Day, zone: string): void {
 	for (const post of posts) {
 		const channel = post.channelId;
-		const day = sentDayOf(post);
+		const day = sentDayOf(post, zone);
 		if (!channel || !channels.has(channel) || !day || daysBetween(from, day) < 0 || daysBetween(day, today) < 0) continue;
 		const counts = (work.counts[channel] ??= { network: 0, buffer: 0, api: 0 });
 		if (post.via === "network" || post.via === "buffer" || post.via === "api") counts[post.via]++;
@@ -232,8 +235,10 @@ export function originsDue(p: PhaseContext): boolean {
 export async function runOriginsPhase(p: PhaseContext): Promise<void> {
 	const work = p.report.originsWork;
 	if (!work?.ready) return;
-	const today = utcDay(p.now);
-	const origins = parseOrigins(await p.ctx.storage[REPORTS]!.get(ORIGINS_ID));
+	const zone = p.settings.timeZone;
+	const today = dayOf(p.now, zone);
+	// A row keyed in another zone (UTC, before 0.1.5) reads as empty and is replaced.
+	const origins = parseOrigins(await p.ctx.storage[REPORTS]!.get(ORIGINS_ID), zone);
 	const channels = work.channels ?? Object.keys(work.days);
 	for (const c of channels) {
 		const kept = Object.fromEntries(Object.entries(origins.days[c] ?? {}).filter(([day]) => daysBetween(day, work.since) > 0));

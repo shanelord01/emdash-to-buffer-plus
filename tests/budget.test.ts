@@ -346,6 +346,27 @@ describe("report runs", () => {
 		expect(calls).toContain("storagePut");
 	});
 
+	it("the first sync after updating from 0.1.4, whose days were UTC: the rebuild costs no call of its own", async () => {
+		host = await newHost();
+		const { dayZone: _zone, ...old } = nothingDue();
+		await reportSetup(host, old);
+		// The row 0.1.4 wrote, keyed by UTC day and with no zone.
+		await host.fixtures.plugin.storage("reports", "aggregates", { days: { c1: { [today]: { posts: 1, metrics: { reactions: 1 }, metricsUpdatedAt: NOW.toISOString() } } }, ranges: {}, progress: { c1: { recentOn: today, backTo: today } }, rangesOn: today });
+		for (let i = 0; i < 3; i++) await seedDelivery(host, `posts:e${i}:c1`, { entryId: `e${i}`, status: "sent", postId: `p${i}`, postStatus: "sent" });
+		await respond(
+			host,
+			metricsAnswer([0, 1, 2].map((i) => postNode(`p${i}`, { metrics: [metric("reactions", i + 1)], metricsUpdatedAt: NOW.toISOString() })), { endCursor: "c", hasNextPage: true }),
+			aggregatesAnswer(30, baseline(1, 2, 3)),
+		);
+
+		const calls = await bridgeCalls(tick(host, "sync"));
+
+		expect(calls.length, calls.join(", ")).toBeLessThanOrEqual(LIMIT);
+		// Both passes the UTC days marked done run again at once.
+		expect(calls.filter((c) => c === "httpFetch")).toHaveLength(2);
+		expect(calls).toContain("storagePut");
+	});
+
 	for (const name of ["catchup-a", "catchup-b"]) {
 		it(`a ${name} run that backfills two rounds of aggregates`, async () => {
 			host = await newHost();
